@@ -1,0 +1,542 @@
+# ============================================================================
+# EZHI Batterie-Regelung Blueprint v1.0.0 - Vollversion
+# ============================================================================
+# Intelligente Batterie-Steuerung für APsystems EZHI Hybrid-Wechselrichter
+# Mit Logging und Notifications
+#
+# INSTALLATION:
+# 1. Diese Datei nach /config/blueprints/automation/ezhi/ kopieren
+# 2. In Home Assistant: Einstellungen → Automatisierungen → Blueprint erstellen
+# 3. Die benötigten Entities auswählen
+# ============================================================================
+
+blueprint:
+  name: EZHI Batterie-Regelung v1.0.0
+  description: |
+    Intelligente Nulleinspeisung mit Batterie-Strategie für APsystems EZHI.
+    
+    **Features:**
+    - 5W-Netzbilanz-Regelung mit adaptiver Peak-Erkennung
+    - Asymmetrische Rampe und Anti-Oszillations-Logik
+    - SOC-Schutz mit PV-Laden (kein Netzladen!)
+    - Solarprognose-basierte Entladetiefe
+    - System-Logging und Notifications
+    
+    **Voraussetzungen:**
+    - APsystems EZHI Integration (von kamilkoze)
+    - Smart Meter mit Netzleistungs-Sensor
+    - Optionale Solcast-Integration für Prognose
+  domain: automation
+  author: Glenbeulah
+  
+  input:
+    # === SENSOREN ===
+    grid_power_sensor:
+      name: Netzleistungs-Sensor
+      description: "Sensor für Netzleistung in Watt (positiv=Bezug, negativ=Einspeisung)"
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+    
+    ezhi_on_grid_power:
+      name: EZHI On-Grid Power
+      description: "number.ezhi_on_grid_power - Sollwert für den Wechselrichter"
+      selector:
+        entity:
+          domain: number
+    
+    battery_soc_sensor:
+      name: Batterie SOC Sensor
+      description: "Batterie-Ladestand in Prozent"
+      selector:
+        entity:
+          domain: sensor
+          device_class: battery
+    
+    pv_power_sensor:
+      name: PV-Leistungs-Sensor
+      description: "Gesamte PV-Produktion in Watt"
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+    
+    battery_power_sensor:
+      name: Batterie-Leistungs-Sensor
+      description: "Tatsächliche Batterieleistung (für Timeout-Erkennung)"
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+    
+    # === HELFER ===
+    charge_limit_helper:
+      name: Lade-Limit Helper
+      description: "input_number für maximalen Ladestand"
+      selector:
+        entity:
+          domain: input_number
+    
+    discharge_limit_helper:
+      name: Entlade-Limit Helper
+      description: "input_number für minimalen Ladestand (Basis)"
+      selector:
+        entity:
+          domain: input_number
+    
+    buffer_power_helper:
+      name: Puffer-Leistung Helper
+      description: "input_number für Netzbilanz-Toleranz"
+      selector:
+        entity:
+          domain: input_number
+    
+    peak_timestamp_helper:
+      name: Peak-Zeitstempel Helper
+      description: "input_datetime für letzten Peak"
+      selector:
+        entity:
+          domain: input_datetime
+    
+    peak_threshold_low_helper:
+      name: Peak-Schwelle Niedrig Helper
+      description: "input_number für kleine Peak-Erkennung"
+      selector:
+        entity:
+          domain: input_number
+    
+    peak_threshold_high_helper:
+      name: Peak-Schwelle Hoch Helper
+      description: "input_number für große Peak-Erkennung"
+      selector:
+        entity:
+          domain: input_number
+    
+    # === NOTIFICATION HELPERS ===
+    discharge_notification_helper:
+      name: Entlade-Limit Notification Helper
+      description: "input_boolean.entlade_limit_notification_sent - für SOC-Schutz Notification"
+      selector:
+        entity:
+          domain: input_boolean
+    
+    pv_laden_notification_helper:
+      name: PV-Laden Notification Helper
+      description: "input_boolean.pv_laden_notification_sent - für PV-Laden Notification"
+      selector:
+        entity:
+          domain: input_boolean
+    
+    charge_notification_helper:
+      name: Lade-Limit Notification Helper
+      description: "input_boolean.lade_limit_notification_sent - für Batterie-voll Notification"
+      selector:
+        entity:
+          domain: input_boolean
+    
+    # === OPTIONAL: SOLARPROGNOSE ===
+    solar_forecast_sensor:
+      name: Solarprognose-Sensor (Optional)
+      description: "Solcast Prognose für morgen in kWh (leer lassen wenn nicht vorhanden)"
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+    
+    min_forecast_threshold_helper:
+      name: Min. Prognose-Schwelle Helper (Optional)
+      description: "input_number für Mindest-Prognose"
+      default: ""
+      selector:
+        entity:
+          domain: input_number
+    
+    additional_discharge_helper:
+      name: Zusätzliche Entladung Helper (Optional)
+      description: "input_number für zusätzliche Entladung bei guter Prognose"
+      default: ""
+      selector:
+        entity:
+          domain: input_number
+    
+    # === PARAMETER ===
+    target_grid_power:
+      name: Ziel-Netzbilanz
+      description: "Ziel-Wert für Netzleistung (Standard: -10W = leichte Einspeisung)"
+      default: -10
+      selector:
+        number:
+          min: -100
+          max: 100
+          unit_of_measurement: W
+    
+    min_inverter_power:
+      name: Max. Ladeleistung
+      description: "Maximale Ladeleistung (negativer Wert)"
+      default: -1200
+      selector:
+        number:
+          min: -3000
+          max: 0
+          unit_of_measurement: W
+    
+    max_inverter_power:
+      name: Max. Entladeleistung
+      description: "Maximale Entladeleistung (positiver Wert)"
+      default: 1200
+      selector:
+        number:
+          min: 0
+          max: 3000
+          unit_of_measurement: W
+
+# ============================================================================
+# TRIGGER
+# ============================================================================
+trigger:
+  - platform: state
+    entity_id: !input grid_power_sensor
+
+# ============================================================================
+# BEDINGUNG: Mindestabstand zwischen Ausführungen (0.3s)
+# ============================================================================
+condition:
+  - condition: template
+    value_template: >
+      {% set last = this.attributes.last_triggered | default(0, true) %}
+      {{ (as_timestamp(now()) - (as_timestamp(last) | float(0))) > 0.3 }}
+
+# ============================================================================
+# VARIABLEN
+# ============================================================================
+variables:
+  # Input-Referenzen
+  grid_sensor: !input grid_power_sensor
+  wr_number: !input ezhi_on_grid_power
+  soc_sensor: !input battery_soc_sensor
+  pv_sensor: !input pv_power_sensor
+  batt_power_sensor: !input battery_power_sensor
+  charge_limit_input: !input charge_limit_helper
+  discharge_limit_input: !input discharge_limit_helper
+  buffer_input: !input buffer_power_helper
+  peak_time_input: !input peak_timestamp_helper
+  peak_low_input: !input peak_threshold_low_helper
+  peak_high_input: !input peak_threshold_high_helper
+  discharge_notif_input: !input discharge_notification_helper
+  pv_laden_notif_input: !input pv_laden_notification_helper
+  charge_notif_input: !input charge_notification_helper
+  forecast_sensor: !input solar_forecast_sensor
+  forecast_threshold_input: !input min_forecast_threshold_helper
+  additional_discharge_input: !input additional_discharge_helper
+  target_power: !input target_grid_power
+  min_inv: !input min_inverter_power
+  max_inv: !input max_inverter_power
+  
+  # Sensor-Werte
+  istwert: "{{ states(grid_sensor) | float(0) }}"
+  aktuell: "{{ states(wr_number) | float(0) }}"
+  soc: "{{ states(soc_sensor) | float(0) }}"
+  pv_power: "{{ states(pv_sensor) | float(0) }}"
+  wr_istwert: "{{ states(batt_power_sensor) | float(0) }}"
+  wr_im_timeout: "{{ (aktuell | abs) > 50 and (wr_istwert | abs) < 10 }}"
+  
+  # Helfer-Werte
+  lade_limit: "{{ states(charge_limit_input) | float(95) }}"
+  entlade_limit_basis: "{{ states(discharge_limit_input) | float(20) }}"
+  puffer: "{{ states(buffer_input) | float(100) }}"
+  
+  # Solarprognose (optional)
+  solarprognose_morgen: >
+    {% if forecast_sensor %}
+      {{ states(forecast_sensor) | float(0) }}
+    {% else %}
+      0
+    {% endif %}
+  min_prognose_schwelle: >
+    {% if forecast_threshold_input %}
+      {{ states(forecast_threshold_input) | float(3) }}
+    {% else %}
+      999
+    {% endif %}
+  zusaetzliche_entladung: >
+    {% if additional_discharge_input %}
+      {{ states(additional_discharge_input) | float(5) }}
+    {% else %}
+      0
+    {% endif %}
+  
+  # Dynamisches Entlade-Limit
+  entlade_limit: |
+    {% if solarprognose_morgen >= min_prognose_schwelle %}
+      {{ (entlade_limit_basis - zusaetzliche_entladung) | float }}
+    {% else %}
+      {{ entlade_limit_basis | float }}
+    {% endif %}
+  
+  # Konstanten
+  sollwert: "{{ target_power }}"
+  min_inverter: "{{ min_inv }}"
+  max_inverter: "{{ max_inv }}"
+  
+  # SOC-Schutz Parameter
+  soc_schutz_puffer: 40
+  soc_schutz_rampe: 70
+  soc_schutz_min_ladung: 30
+  
+  soc_schutz_ladewert: |
+    {% if pv_power > 10 and istwert < -50 %}
+      {% set ueberschuss = istwert | float %}
+      {% set ziel = ueberschuss + soc_schutz_puffer %}
+      {% if ziel < min_inverter %}
+        {% set ziel = min_inverter %}
+      {% endif %}
+      {% if ziel > -soc_schutz_min_ladung %}
+        {% set ziel = -soc_schutz_min_ladung %}
+      {% endif %}
+      {% if aktuell > ziel %}
+        {% set neuer_wert = aktuell - soc_schutz_rampe %}
+        {% if neuer_wert < ziel %}
+          {% set neuer_wert = ziel %}
+        {% endif %}
+        {{ neuer_wert | round(0) }}
+      {% else %}
+        {{ ziel | round(0) }}
+      {% endif %}
+    {% else %}
+      0
+    {% endif %}
+  
+  # Peak-Erkennung
+  peak_schwelle_niedrig: "{{ states(peak_low_input) | float(200) }}"
+  peak_schwelle_hoch: "{{ states(peak_high_input) | float(600) }}"
+  
+  peak_level: |
+    {% if istwert > peak_schwelle_hoch %}
+      2
+    {% elif istwert > peak_schwelle_niedrig %}
+      1
+    {% else %}
+      0
+    {% endif %}
+  
+  # Regelungsfaktoren
+  faktor_basis: 0.25
+  faktor_peak_klein: 0.6
+  faktor_peak_gross: 1
+  
+  last_peak: "{{ states(peak_time_input) | as_timestamp | default(0) | float(0) }}"
+  time_since_peak: "{{ as_timestamp(now()) - last_peak }}"
+  
+  post_peak_damping: |
+    {% set t = time_since_peak %}
+    {% if t < 15 %}
+      0.4
+    {% elif t < 45 %}
+      0.7
+    {% elif t < 90 %}
+      0.9
+    {% else %}
+      1.0
+    {% endif %}
+  
+  faktor: >
+    {% set level = peak_level | int %}
+    {% set base_factor = faktor_peak_gross if level == 2 else (faktor_peak_klein if level == 1 else faktor_basis) %}
+    {{ (base_factor * post_peak_damping) | float }}
+  
+  tau: 45
+  decay: |
+    {% set t = time_since_peak %}
+    {% if t > 120 %}
+      1.0
+    {% else %}
+      {{ (2.718281828459045 ** (-t/tau)) | float }}
+    {% endif %}
+  
+  delta: |
+    {% set raw = (istwert | float) * (faktor | float) %}
+    {% set max_delta = 600 %}
+    {% if raw > max_delta %}
+      {{ max_delta | float }}
+    {% elif raw < -max_delta %}
+      {{ -max_delta | float }}
+    {% else %}
+      {{ raw | float }}
+    {% endif %}
+  
+  raw_target: "{{ (aktuell | float) + ((delta | float) * (decay | float)) }}"
+  
+  new_value: |
+    {% set target = raw_target | float %}
+    {% if target > max_inverter %}
+      {{ max_inverter }}
+    {% elif target < min_inverter %}
+      {{ min_inverter }}
+    {% else %}
+      {{ target | round(0) }}
+    {% endif %}
+
+# ============================================================================
+# AKTIONEN
+# ============================================================================
+action:
+  - choose:
+      # SOC-SCHUTZ
+      - conditions:
+          - condition: template
+            value_template: "{{ soc <= entlade_limit }}"
+        sequence:
+          - service: system_log.write
+            data:
+              message: >-
+                [SOC-SCHUTZ] {{ soc }}% ≤ {{ entlade_limit }}% – 
+                {% if pv_power > 10 and istwert < -50 %}
+                  PV-Laden: Überschuss={{ (istwert * -1) | round(0) }}W, 
+                  Ziel={{ (soc_schutz_ladewert * -1) | round(0) }}W, 
+                  WR: {{ aktuell | round(0) }}W → {{ soc_schutz_ladewert }}W
+                  {% if wr_im_timeout %} [TIMEOUT]{% endif %}
+                {% elif pv_power > 10 %}
+                  Warte auf Überschuss (PV: {{ pv_power | round(0) }}W)
+                {% else %}
+                  Kein PV, WR → 0W
+                {% endif %}
+              level: info
+          
+          # PV-LADEN NOTIFICATION (unabhängig!)
+          - if:
+              - condition: template
+                value_template: "{{ pv_power > 10 and istwert < -50 }}"
+              - condition: template
+                value_template: "{{ is_state(pv_laden_notif_input, 'off') }}"
+            then:
+              - service: persistent_notification.create
+                data:
+                  title: 🔋🌞 SOC-Minimum + PV aktiv
+                  message: >-
+                    SOC: {{ soc }}% ≤ Limit: {{ entlade_limit }}% – 
+                    PV-Laden mit max {{ ((istwert * -1) - soc_schutz_puffer) | round(0) }}W
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: !input pv_laden_notification_helper
+          
+          # SOC-SCHUTZ NOTIFICATION (kein PV)
+          - if:
+              - condition: template
+                value_template: "{{ not (pv_power > 10 and istwert < -50) }}"
+              - condition: template
+                value_template: "{{ is_state(discharge_notif_input, 'off') }}"
+            then:
+              - service: persistent_notification.create
+                data:
+                  title: 🔋 SOC-Schutz aktiv
+                  message: >-
+                    SOC: {{ soc }}% ≤ Limit: {{ entlade_limit }}% – 
+                    Warte auf PV-Überschuss
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: !input discharge_notification_helper
+              # Reset PV-Notification damit sie wieder kommt wenn PV startet
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: !input pv_laden_notification_helper
+          
+          - service: number.set_value
+            target:
+              entity_id: !input ezhi_on_grid_power
+            data:
+              value: "{{ soc_schutz_ladewert }}"
+          - stop: ""
+    
+    # NORMALE REGELUNG
+    default:
+      # Reset BEIDE Notification-Booleans wenn SOC > Limit
+      - if:
+          - condition: template
+            value_template: "{{ soc > entlade_limit }}"
+        then:
+          - if:
+              - condition: template
+                value_template: "{{ is_state(discharge_notif_input, 'on') }}"
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: !input discharge_notification_helper
+          - if:
+              - condition: template
+                value_template: "{{ is_state(pv_laden_notif_input, 'on') }}"
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: !input pv_laden_notification_helper
+      
+      - condition: template
+        value_template: "{{ (istwert > (sollwert + puffer) or istwert < (sollwert - puffer)) }}"
+      
+      # Lade-Limit Notification
+      - if:
+          - condition: template
+            value_template: "{{ soc >= lade_limit and istwert < 0 }}"
+          - condition: template
+            value_template: "{{ is_state(charge_notif_input, 'off') }}"
+        then:
+          - service: system_log.write
+            data:
+              message: "🌞 Batterie voll ({{ soc }}%)"
+              level: info
+          - service: persistent_notification.create
+            data:
+              title: 🌞 Batterie voll
+              message: "SOC: {{ soc }}% ≥ Lade-Limit {{ lade_limit }}%"
+          - service: input_boolean.turn_on
+            target:
+              entity_id: !input charge_notification_helper
+      
+      # Lade-Limit Reset
+      - if:
+          - condition: template
+            value_template: "{{ soc < lade_limit }}"
+          - condition: template
+            value_template: "{{ is_state(charge_notif_input, 'on') }}"
+        then:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: !input charge_notification_helper
+      
+      # WR-Sollwert setzen
+      - service: number.set_value
+        target:
+          entity_id: !input ezhi_on_grid_power
+        data:
+          value: "{{ new_value }}"
+      
+      # Logging
+      - service: system_log.write
+        data:
+          message: >
+            [REGELUNG] ist={{ istwert }}W, WR_neu={{ new_value }}W, 
+            delta={{ delta | round(0) }}W, peak={{ peak_level }}, faktor={{ faktor | round(2) }}
+          level: info
+      
+      # Peak-Notification und Timestamp
+      - if:
+          - condition: template
+            value_template: "{{ peak_level > 0 and (last_peak == 0 or time_since_peak > 30) }}"
+        then:
+          - service: persistent_notification.create
+            data:
+              title: >
+                {% if peak_level == 2 %}⚡ GROßER PEAK erkannt
+                {% else %}⚡ Peak erkannt{% endif %}
+              message: >
+                Netzlast {{ istwert }}W — 
+                {% if peak_level == 2 %}Verstärkte{% else %}Moderate{% endif %} 
+                Reaktion (Faktor {{ faktor | round(2) }})
+          - service: input_datetime.set_datetime
+            target:
+              entity_id: !input peak_timestamp_helper
+            data:
+              timestamp: "{{ as_timestamp(now()) }}"
+
+mode: single
+max_exceeded: silent

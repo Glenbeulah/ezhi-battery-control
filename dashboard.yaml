@@ -1,0 +1,727 @@
+# ============================================================================
+# EZHI Batterie-Regelung v1.0.0 - Dashboard
+# ============================================================================
+# Lovelace Dashboard für die Batterie-Steuerung
+# 
+# BENÖTIGTE HACS-INTEGRATIONEN:
+# - mushroom (https://github.com/piitaya/lovelace-mushroom)
+# - power-flow-card-plus (https://github.com/flixlix/power-flow-card-plus)
+# - fold-entity-row (https://github.com/thomasloven/lovelace-fold-entity-row)
+# ============================================================================
+
+views:
+  - title: Batterie Steuerung
+    path: energie
+    icon: mdi:solar-power
+    cards:
+      # ================================================================
+      # ÜBERSICHTS-CHIPS: Schnelle Status-Anzeige
+      # ================================================================
+      - type: vertical-stack
+        cards:
+          - type: custom:mushroom-chips-card
+            alignment: center
+            chips:
+              # Netz-Status
+              - type: template
+                entity: sensor.sm63_net_power
+                icon: mdi:transmission-tower
+                content: '{{ states(''sensor.sm63_net_power'') }} W'
+                icon_color: >
+                  {% set netz = states('sensor.sm63_net_power') | float(0) %}
+                  {% if netz >= 0 %} red {% else %} green {% endif %}
+                badge: |
+                  {% if netz >= 0 %} Bezug {% else %} Einspeisung {% endif %}
+                badge_color: |
+                  {% if netz >= 0 %} red {% else %} green {% endif %}
+              
+              # PV-Produktion
+              - type: template
+                entity: sensor.pv_produktion_gesamt
+                icon: mdi:solar-power
+                content: '{{ states(''sensor.pv_produktion_gesamt'') }} W'
+                icon_color: |
+                  {% if states('sensor.pv_produktion_gesamt') | float(0) > 0 %}
+                    green
+                  {% else %}
+                    grey
+                  {% endif %}
+              
+              # Hausverbrauch
+              - type: template
+                entity: sensor.hausverbrauch
+                icon: mdi:home-lightning-bolt
+                content: '{{ states(''sensor.hausverbrauch'') }} W'
+                icon_color: blue
+              
+              # Batterie SOC
+              - type: template
+                entity: sensor.battery_soc
+                icon: mdi:battery-high
+                content: '{{ states(''sensor.battery_soc'') }} %'
+                icon_color: >
+                  {% set soc = states('sensor.battery_soc') | float(0) %}
+                  {% if soc < 20 %} red
+                  {% elif soc > 90 %} green
+                  {% else %} orange {% endif %}
+                badge: >
+                  {% if soc < 20 %} Niedrig
+                  {% elif soc > 90 %} Voll
+                  {% else %} Mittel {% endif %}
+                badge_color: >
+                  {% if soc < 20 %} red
+                  {% elif soc > 90 %} green
+                  {% else %} orange {% endif %}
+
+          # ================================================================
+          # DETAIL-KARTEN MIT TREND-GRAPHEN
+          # ================================================================
+          - type: horizontal-stack
+            cards:
+              - type: custom:mushroom-template-card
+                entity: sensor.sm63_net_power
+                primary: Netz
+                secondary: '{{ states(''sensor.sm63_net_power'') }} W'
+                icon: mdi:transmission-tower
+                color: |
+                  {% if states('sensor.sm63_net_power') | float(0) >= 0 %}
+                    red
+                  {% else %}
+                    green
+                  {% endif %}
+                vertical: true
+                features_position: bottom
+                features:
+                  - type: trend-graph
+                    hours_to_show: 8
+                    aggregate_function: avg
+
+              - type: custom:mushroom-template-card
+                entity: sensor.pv_produktion_gesamt
+                primary: PV
+                secondary: '{{ states(''sensor.pv_produktion_gesamt'') }} W'
+                icon: mdi:solar-power
+                color: |
+                  {% if states('sensor.pv_produktion_gesamt') | float(0) > 0 %}
+                    green
+                  {% else %}
+                    grey
+                  {% endif %}
+                vertical: true
+                features_position: bottom
+                features:
+                  - type: trend-graph
+                    hours_to_show: 8
+                    aggregate_function: avg
+
+              - type: custom:mushroom-template-card
+                entity: sensor.hausverbrauch
+                primary: Haus
+                secondary: '{{ states(''sensor.hausverbrauch'') }} W'
+                icon: mdi:home-lightning-bolt
+                color: blue
+                vertical: true
+                features_position: bottom
+                features:
+                  - type: trend-graph
+                    hours_to_show: 8
+                    aggregate_function: avg
+
+              - type: custom:mushroom-template-card
+                entity: sensor.battery_soc
+                primary: Batterie
+                secondary: '{{ states(''sensor.battery_soc'') }} %'
+                icon: mdi:battery-high
+                color: >
+                  {% set soc = states('sensor.battery_soc') | float(0) %}
+                  {% if soc < 20 %} red
+                  {% elif soc > 90 %} green
+                  {% else %} orange {% endif %}
+                vertical: true
+                features_position: bottom
+                features:
+                  - type: bar-gauge
+
+      # ================================================================
+      # POWER FLOW CARD: Visuelle Energiefluss-Darstellung
+      # ================================================================
+      - type: custom:power-flow-card-plus
+        entities:
+          battery:
+            entity: sensor.ezhi_battery_power
+            state_of_charge: sensor.battery_soc
+            name: Batterie
+            color_icon: true
+            color_circle: true
+            color:
+              consumption:
+                - 0
+                - 66
+                - 170
+              production:
+                - 196
+                - 188
+                - 0
+            invert_state: true
+          grid:
+            entity: sensor.sm63_net_power
+            name: Netz
+            color_icon: true
+            color_circle: true
+            display_zero_tolerance: 2
+            secondary_info: {}
+            color:
+              production:
+                - 119
+                - 187
+                - 65
+              consumption:
+                - 121
+                - 26
+                - 62
+            color_value: true
+          solar:
+            entity: sensor.pv_produktion_gesamt
+            name: PV
+            display_zero_state: true
+            color_icon: true
+            color_circle: true
+            secondary_info: {}
+            color:
+              - 254
+              - 199
+              - 0
+          home:
+            entity: sensor.hausverbrauch
+            name: Haus
+            color_icon: true
+            color_circle: true
+            secondary_info: {}
+            color_value: true
+            subtract_individual: false
+        clickable_entities: true
+        display_zero_lines: true
+        use_new_flow_rate_model: true
+        w_decimals: 0
+        kw_decimals: 1
+        min_flow_rate: 0.75
+        max_flow_rate: 6
+        max_expected_power: 20000
+        min_expected_power: 0.01
+        watt_threshold: 1000
+        transparency_zero_lines: 0
+        sort_individual_devices: false
+
+      # ================================================================
+      # STEUERUNG: Parameter und aktuelle Werte
+      # ================================================================
+      - type: vertical-stack
+        cards:
+          - type: entities
+            title: EZHI Netzbilanz-Steuerung
+            entities:
+              - entity: sensor.sm63_net_power
+                name: Netzleistung
+              - entity: sensor.ezhi_battery_power
+              - entity: number.ezhi_on_grid_power
+                name: EZHI On-Grid Leistung
+              - entity: sensor.battery_soc
+                name: Batterie SoC
+              - entity: input_number.lade_limit
+                name: Lade-Limit Batterie
+              - entity: input_number.entlade_limit
+                name: Entlade-Limit Batterie
+              - entity: input_number.puffer_leistung
+                name: Netzbilanz-Puffer
+              - entity: input_number.min_solarprognose_schwelle
+              - entity: input_number.zusaetzliche_entladung_prozent
+              - entity: input_number.peak_schwelle
+              - entity: input_number.peak_schwelle_niedrig
+              - entity: input_number.peak_schwelle_hoch
+
+      # ================================================================
+      # VERLAUF: Kurze Echtzeit-Ansicht
+      # ================================================================
+      - title: Verlauf
+        type: history-graph
+        hours_to_show: 0.05
+        entities:
+          - sensor.sm63_net_power
+          - sensor.ezhi_battery_power
+
+      # ================================================================
+      # STATUS-KARTEN: Batterie und System
+      # ================================================================
+      - type: vertical-stack
+        cards:
+          - type: horizontal-stack
+            cards:
+              # Batterie-Status
+              - type: custom:mushroom-template-card
+                entity: sensor.ezhi_battery_status
+                primary: Batterie Status
+                secondary: >
+                  {% if is_state('sensor.ezhi_battery_status','Charging') %}
+                    Laden
+                  {% elif is_state('sensor.ezhi_battery_status','Discharging') %}
+                    Entladen
+                  {% elif is_state('sensor.ezhi_battery_status','Fault') %}
+                    Fehler
+                  {% elif is_state('sensor.ezhi_battery_status','Shutdown') %}
+                    Shutdown
+                  {% elif is_state('sensor.ezhi_battery_status','No Communication') %}
+                    Keine Kommunikation
+                  {% else %}
+                    Leerlauf
+                  {% endif %}
+                icon: >
+                  {% if is_state('sensor.ezhi_battery_status','Charging') %}
+                    mdi:battery-charging
+                  {% elif is_state('sensor.ezhi_battery_status','Discharging') %}
+                    mdi:flash
+                  {% elif is_state('sensor.ezhi_battery_status','Fault') %}
+                    mdi:alert-circle
+                  {% elif is_state('sensor.ezhi_battery_status','Shutdown') %}
+                    mdi:battery-off
+                  {% elif is_state('sensor.ezhi_battery_status','No Communication') %}
+                    mdi:access-point-network-off
+                  {% else %}
+                    mdi:battery
+                  {% endif %}
+                vertical: true
+                color: >
+                  {% if is_state('sensor.ezhi_battery_status','Charging') %}
+                    green
+                  {% elif is_state('sensor.ezhi_battery_status','Discharging') %}
+                    blue
+                  {% elif is_state('sensor.ezhi_battery_status','Fault') %}
+                    red
+                  {% elif is_state('sensor.ezhi_battery_status','Shutdown') %}
+                    grey
+                  {% elif is_state('sensor.ezhi_battery_status','No Communication') %}
+                    orange
+                  {% else %}
+                    teal
+                  {% endif %}
+                features_position: bottom
+
+              # Systemstatus (Alarm-Übersicht)
+              - type: custom:mushroom-template-card
+                primary: Systemstatus
+                vertical: true
+                secondary: >
+                  {% if is_state('binary_sensor.ezhi_battery_overtemperature','on')
+                     or is_state('binary_sensor.ezhi_battery_undertemperature','on')
+                     or is_state('binary_sensor.ezhi_battery_communication_error','on')
+                     or is_state('binary_sensor.ezhi_battery_overvoltage','on')
+                     or is_state('binary_sensor.ezhi_battery_undervoltage','on')
+                     or is_state('binary_sensor.ezhi_battery_overcurrent','on')
+                     or is_state('binary_sensor.ezhi_battery_error','on')
+                     or is_state('binary_sensor.ezhi_battery_shutdown','on')
+                     or is_state('binary_sensor.ezhi_device_overtemperature','on')
+                     or is_state('binary_sensor.ezhi_device_error','on')
+                     or is_state('binary_sensor.ezhi_ac_abnormal','on')
+                     or is_state('binary_sensor.ezhi_off_grid_overcurrent','on')
+                     or is_state('binary_sensor.ezhi_off_grid_short_circuit','on')
+                     or is_state('binary_sensor.ezhi_pv_overvoltage','on')
+                     or is_state('binary_sensor.ezhi_pv_overcurrent','on')
+                     or is_state('binary_sensor.ezhi_pv_wiring_error','on')
+                     or is_state('binary_sensor.ezhi_ird_error','on') %}
+                     Fehler aktiv!
+                  {% else %}
+                     OK
+                  {% endif %}
+                icon: >
+                  {% if is_state('binary_sensor.ezhi_battery_overtemperature','on')
+                     or is_state('binary_sensor.ezhi_battery_undertemperature','on')
+                     or is_state('binary_sensor.ezhi_battery_communication_error','on')
+                     or is_state('binary_sensor.ezhi_battery_overvoltage','on')
+                     or is_state('binary_sensor.ezhi_battery_undervoltage','on')
+                     or is_state('binary_sensor.ezhi_battery_overcurrent','on')
+                     or is_state('binary_sensor.ezhi_battery_error','on')
+                     or is_state('binary_sensor.ezhi_battery_shutdown','on')
+                     or is_state('binary_sensor.ezhi_device_overtemperature','on')
+                     or is_state('binary_sensor.ezhi_device_error','on')
+                     or is_state('binary_sensor.ezhi_ac_abnormal','on')
+                     or is_state('binary_sensor.ezhi_off_grid_overcurrent','on')
+                     or is_state('binary_sensor.ezhi_off_grid_short_circuit','on')
+                     or is_state('binary_sensor.ezhi_pv_overvoltage','on')
+                     or is_state('binary_sensor.ezhi_pv_overcurrent','on')
+                     or is_state('binary_sensor.ezhi_pv_wiring_error','on')
+                     or is_state('binary_sensor.ezhi_ird_error','on') %}
+                     mdi:alert-circle
+                  {% else %}
+                     mdi:check-circle
+                  {% endif %}
+                color: >
+                  {% if is_state('binary_sensor.ezhi_battery_overtemperature','on')
+                     or is_state('binary_sensor.ezhi_battery_undertemperature','on')
+                     or is_state('binary_sensor.ezhi_battery_communication_error','on')
+                     or is_state('binary_sensor.ezhi_battery_overvoltage','on')
+                     or is_state('binary_sensor.ezhi_battery_undervoltage','on')
+                     or is_state('binary_sensor.ezhi_battery_overcurrent','on')
+                     or is_state('binary_sensor.ezhi_battery_error','on')
+                     or is_state('binary_sensor.ezhi_battery_shutdown','on')
+                     or is_state('binary_sensor.ezhi_device_overtemperature','on')
+                     or is_state('binary_sensor.ezhi_device_error','on')
+                     or is_state('binary_sensor.ezhi_ac_abnormal','on')
+                     or is_state('binary_sensor.ezhi_off_grid_overcurrent','on')
+                     or is_state('binary_sensor.ezhi_off_grid_short_circuit','on')
+                     or is_state('binary_sensor.ezhi_pv_overvoltage','on')
+                     or is_state('binary_sensor.ezhi_pv_overcurrent','on')
+                     or is_state('binary_sensor.ezhi_pv_wiring_error','on')
+                     or is_state('binary_sensor.ezhi_ird_error','on') %}
+                     red
+                  {% else %}
+                     green
+                  {% endif %}
+                features_position: bottom
+
+          # ================================================================
+          # ALARM-DETAILS: Aufklappbare Liste aller Fehler-Sensoren
+          # ================================================================
+          - type: custom:fold-entity-row
+            head:
+              type: custom:mushroom-template-card
+              primary: Details Systemstatus
+              color: grey
+            entities:
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_battery_overtemperature
+                primary: Batterie Übertemperatur
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_battery_overtemperature') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_battery_overtemperature') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_battery_overtemperature') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_battery_undertemperature
+                primary: Batterie Untertemperatur
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_battery_undertemperature') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_battery_undertemperature') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_battery_undertemperature') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_battery_communication_error
+                primary: Batterie Kommunikationsfehler
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_battery_communication_error') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_battery_communication_error') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_battery_communication_error') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_battery_overvoltage
+                primary: Batterie Überspannung
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_battery_overvoltage') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_battery_overvoltage') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_battery_overvoltage') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_battery_undervoltage
+                primary: Batterie Unterspannung
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_battery_undervoltage') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_battery_undervoltage') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_battery_undervoltage') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_battery_overcurrent
+                primary: Batterie Überstrom
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_battery_overcurrent') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_battery_overcurrent') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_battery_overcurrent') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_battery_error
+                primary: Allgemeiner Batteriefehler
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_battery_error') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_battery_error') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_battery_error') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_battery_shutdown
+                primary: Batterie Shutdown
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_battery_shutdown') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_battery_shutdown') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_battery_shutdown') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_device_overtemperature
+                primary: Gerät Übertemperatur
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_device_overtemperature') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_device_overtemperature') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_device_overtemperature') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_device_error
+                primary: Gerätefehler
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_device_error') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_device_error') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_device_error') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_ac_abnormal
+                primary: AC Fehler
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_ac_abnormal') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_ac_abnormal') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_ac_abnormal') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_off_grid_overcurrent
+                primary: Off-Grid Überstrom
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_off_grid_overcurrent') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_off_grid_overcurrent') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_off_grid_overcurrent') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_off_grid_short_circuit
+                primary: Off-Grid Kurzschluss
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_off_grid_short_circuit') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_off_grid_short_circuit') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_off_grid_short_circuit') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_pv_overvoltage
+                primary: PV Überspannung
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_pv_overvoltage') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_pv_overvoltage') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_pv_overvoltage') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_pv_overcurrent
+                primary: PV Überstrom
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_pv_overcurrent') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_pv_overcurrent') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_pv_overcurrent') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_pv_wiring_error
+                primary: PV Verdrahtungsfehler
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_pv_wiring_error') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_pv_wiring_error') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_pv_wiring_error') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal
+
+              - type: custom:mushroom-template-card
+                entity: binary_sensor.ezhi_ird_error
+                primary: IRD Fehler
+                secondary: >-
+                  {% set s = states('binary_sensor.ezhi_ird_error') %}
+                  {% if s == 'on' %} Fehler aktiv!
+                  {% elif s == 'off' %} OK
+                  {% else %} Nicht verfügbar {% endif %}
+                icon: >-
+                  {% set s = states('binary_sensor.ezhi_ird_error') %}
+                  {% if s == 'on' %} mdi:alert-circle
+                  {% elif s == 'off' %} mdi:check-circle
+                  {% else %} mdi:help-circle {% endif %}
+                color: >-
+                  {% set s = states('binary_sensor.ezhi_ird_error') %}
+                  {% if s == 'on' %} red
+                  {% elif s == 'off' %} green
+                  {% else %} grey {% endif %}
+                layout: horizontal

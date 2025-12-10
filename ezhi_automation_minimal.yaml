@@ -1,0 +1,197 @@
+# ============================================================================
+# EZHI Batterie-Regelung v1.0.0 - MINIMAL (ohne Logging/Notifications)
+# ============================================================================
+# Gleiche Funktionalität wie Hauptversion, aber ohne:
+# - system_log.write Aufrufe
+# - persistent_notification.create Aufrufe
+# - Notification-Helfer (input_boolean.xxx_notification_sent)
+# ============================================================================
+
+alias: EZHI Batterie-Regelung v1.0.0 Minimal
+description: >
+  Intelligente Nulleinspeisung mit Batterie-Strategie für APsystems EZHI.
+  - 5W-Netzbilanz-Regelung mit adaptiver Peak-Erkennung
+  - Asymmetrische Rampe und Anti-Oszillations-Logik
+  - SOC-Schutz mit PV-Laden (kein Netzladen!)
+  - Solarprognose-basierte Entladetiefe
+  Minimale Version ohne Logging und Notifications.
+
+triggers:
+  - entity_id:
+      - sensor.sm63_net_power
+    trigger: state
+
+conditions:
+  - condition: template
+    value_template: >
+      {% set last = this.attributes.last_triggered | default(0, true) %}
+      {{ (as_timestamp(now()) - (as_timestamp(last) | float(0))) > 0.3 }}
+
+variables:
+  istwert: "{{ states('sensor.sm63_net_power') | float(0) }}"
+  aktuell: "{{ states('number.ezhi_on_grid_power') | float(0) }}"
+  soc: "{{ states('sensor.battery_soc') | float(0) }}"
+  pv_power: "{{ states('sensor.pv_produktion_gesamt') | float(0) }}"
+  wr_istwert: "{{ states('sensor.ezhi_battery_power') | float(0) }}"
+  wr_im_timeout: "{{ (aktuell | abs) > 50 and (wr_istwert | abs) < 10 }}"
+  
+  lade_limit: "{{ states('input_number.lade_limit') | float(95) }}"
+  entlade_limit_basis: "{{ states('input_number.entlade_limit') | float(20) }}"
+  puffer: "{{ states('input_number.puffer_leistung') | float(100) }}"
+  
+  solarprognose_morgen: "{{ states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) }}"
+  min_prognose_schwelle: "{{ states('input_number.min_solarprognose_schwelle') | float(3) }}"
+  zusaetzliche_entladung: "{{ states('input_number.zusaetzliche_entladung_prozent') | float(5) }}"
+  
+  entlade_limit: |
+    {% if solarprognose_morgen >= min_prognose_schwelle %}
+      {{ (entlade_limit_basis - zusaetzliche_entladung) | float }}
+    {% else %}
+      {{ entlade_limit_basis | float }}
+    {% endif %}
+  
+  sollwert: -10
+  min_inverter: -1200
+  max_inverter: 1200
+  
+  soc_schutz_puffer: 40
+  soc_schutz_rampe: 70
+  soc_schutz_min_ladung: 30
+  
+  soc_schutz_ladewert: |
+    {% if pv_power > 10 and istwert < -50 %}
+      {% set ueberschuss = istwert | float %}
+      {% set ziel = ueberschuss + soc_schutz_puffer %}
+      {% if ziel < min_inverter %}
+        {% set ziel = min_inverter %}
+      {% endif %}
+      {% if ziel > -soc_schutz_min_ladung %}
+        {% set ziel = -soc_schutz_min_ladung %}
+      {% endif %}
+      {% if aktuell > ziel %}
+        {% set neuer_wert = aktuell - soc_schutz_rampe %}
+        {% if neuer_wert < ziel %}
+          {% set neuer_wert = ziel %}
+        {% endif %}
+        {{ neuer_wert | round(0) }}
+      {% else %}
+        {{ ziel | round(0) }}
+      {% endif %}
+    {% else %}
+      0
+    {% endif %}
+  
+  peak_schwelle_niedrig: "{{ states('input_number.peak_schwelle_niedrig') | float(200) }}"
+  peak_schwelle_hoch: "{{ states('input_number.peak_schwelle_hoch') | float(600) }}"
+  
+  peak_level: |
+    {% if istwert > peak_schwelle_hoch %}
+      {{ 2 }}
+    {% elif istwert > peak_schwelle_niedrig %}
+      {{ 1 }}
+    {% else %}
+      {{ 0 }}
+    {% endif %}
+  
+  faktor_basis: 0.25
+  faktor_peak_klein: 0.6
+  faktor_peak_gross: 1
+  
+  last_peak: >-
+    {{ states('input_datetime.last_peak') | as_timestamp | default(0) | float(0) }}
+  time_since_peak: "{{ as_timestamp(now()) - last_peak }}"
+  
+  post_peak_damping: |
+    {% set t = time_since_peak %}
+    {% if t < 15 %}
+      {{ 0.4 }}
+    {% elif t < 45 %}
+      {{ 0.7 }}
+    {% elif t < 90 %}
+      {{ 0.9 }}
+    {% else %}
+      {{ 1.0 }}
+    {% endif %}
+  
+  faktor: >
+    {% set level = peak_level | int %}
+    {% set base_factor = faktor_peak_gross if level == 2 else (faktor_peak_klein if level == 1 else faktor_basis) %}
+    {{ (base_factor * post_peak_damping) | float }}
+  
+  tau: 45
+  decay: |
+    {% set t = time_since_peak %}
+    {% if t > 120 %}
+      {{ 1.0 }}
+    {% else %}
+      {{ (2.718281828459045 ** (-t/tau)) | float }}
+    {% endif %}
+  
+  delta: |
+    {% set raw = (istwert | float) * (faktor | float) %}
+    {% set max_delta = 600 %}
+    {% if raw > max_delta %}
+      {{ max_delta | float }}
+    {% elif raw < -max_delta %}
+      {{ -max_delta | float }}
+    {% else %}
+      {{ raw | float }}
+    {% endif %}
+  
+  raw_target: "{{ (aktuell | float) + ((delta | float) * (decay | float)) }}"
+  
+  new_value: |
+    {% set target = raw_target | float %}
+    {% if target > max_inverter %}
+      {{ max_inverter }}
+    {% elif target < min_inverter %}
+      {{ min_inverter }}
+    {% else %}
+      {{ target | round(0) }}
+    {% endif %}
+
+actions:
+  - choose:
+      # SOC-SCHUTZ: Batterie am Minimum
+      - conditions:
+          - condition: template
+            value_template: "{{ soc <= entlade_limit }}"
+        sequence:
+          - target:
+              entity_id: number.ezhi_on_grid_power
+            data:
+              value: "{{ soc_schutz_ladewert }}"
+            action: number.set_value
+          - stop: ""
+    
+    # NORMALE REGELUNG
+    default:
+      - condition: template
+        value_template: "{{ (istwert > (sollwert + puffer) or istwert < (sollwert - puffer)) }}"
+      
+      # WR-Sollwert setzen
+      - target:
+          entity_id: number.ezhi_on_grid_power
+        data:
+          value: "{{ new_value }}"
+        action: number.set_value
+      
+      # Peak-Zeitstempel aktualisieren (für Dämpfungslogik)
+      - if:
+          - condition: template
+            value_template: "{{ peak_level > 0 }}"
+        then:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ last_peak == 0 or (as_timestamp(now()) - last_peak) > 30 }}
+                sequence:
+                  - target:
+                      entity_id: input_datetime.last_peak
+                    data:
+                      timestamp: "{{ as_timestamp(now()) }}"
+                    action: input_datetime.set_datetime
+
+mode: single
+max_exceeded: silent

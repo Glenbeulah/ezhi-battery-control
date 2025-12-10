@@ -1,0 +1,133 @@
+# ============================================================================
+# EZHI Batterie-Regelung v1.0.0 - Benötigte Helfer
+# ============================================================================
+# Diese Helfer müssen in Home Assistant erstellt werden.
+# 
+# OPTION 1: Manuell über UI erstellen (Einstellungen → Geräte & Dienste → Helfer)
+# OPTION 2: In configuration.yaml einbinden:
+#           input_number: !include helpers/input_number.yaml
+#           input_boolean: !include helpers/input_boolean.yaml
+#           input_datetime: !include helpers/input_datetime.yaml
+# OPTION 3: Alles in configuration.yaml kopieren
+# ============================================================================
+
+# ============================================================================
+# INPUT_NUMBER - Regelungsparameter
+# ============================================================================
+input_number:
+  # --- Batterie-Limits ---
+  lade_limit:
+    name: Lade-Limit Batterie
+    min: 50
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:battery-charging-100
+    mode: slider
+  
+  entlade_limit:
+    name: Entlade-Limit Batterie
+    min: 5
+    max: 50
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:battery-alert
+    mode: slider
+  
+  # --- Regelungsparameter ---
+  puffer_leistung:
+    name: Netzbilanz-Puffer
+    min: 0
+    max: 500
+    step: 10
+    unit_of_measurement: "W"
+    icon: mdi:arrow-expand-horizontal
+    mode: slider
+  
+  # --- Solarprognose-Integration ---
+  min_solarprognose_schwelle:
+    name: Min. Solarprognose für tiefere Entladung
+    min: 0
+    max: 20
+    step: 0.5
+    unit_of_measurement: "kWh"
+    icon: mdi:weather-sunny
+    mode: slider
+  
+  zusaetzliche_entladung_prozent:
+    name: Zusätzliche Entladung bei guter Prognose
+    min: 0
+    max: 20
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:battery-minus
+    mode: slider
+  
+  # --- Peak-Erkennung ---
+  peak_schwelle:
+    name: Peak-Schwelle (Legacy)
+    min: 100
+    max: 1000
+    step: 50
+    unit_of_measurement: "W"
+    icon: mdi:chart-bell-curve
+    mode: slider
+  
+  peak_schwelle_niedrig:
+    name: Peak-Schwelle Niedrig
+    min: 50
+    max: 500
+    step: 25
+    unit_of_measurement: "W"
+    icon: mdi:chart-bell-curve
+    mode: slider
+  
+  peak_schwelle_hoch:
+    name: Peak-Schwelle Hoch
+    min: 200
+    max: 1500
+    step: 50
+    unit_of_measurement: "W"
+    icon: mdi:chart-bell-curve-cumulative
+    mode: slider
+
+# ============================================================================
+# INPUT_BOOLEAN - Notification-Status (nur für Vollversion nötig)
+# ============================================================================
+input_boolean:
+  entlade_limit_notification_sent:
+    name: Entlade-Limit Notification gesendet
+    icon: mdi:bell-check
+  
+  pv_laden_notification_sent:
+    name: PV-Laden Notification gesendet
+    icon: mdi:bell-check
+  
+  lade_limit_notification_sent:
+    name: Lade-Limit Notification gesendet
+    icon: mdi:bell-check
+
+# ============================================================================
+# INPUT_DATETIME - Peak-Tracking
+# ============================================================================
+input_datetime:
+  last_peak:
+    name: Letzter Peak Zeitstempel
+    has_date: true
+    has_time: true
+    icon: mdi:clock-alert
+
+
+# ============================================================================
+# EMPFOHLENE ANFANGSWERTE
+# ============================================================================
+# Nach dem Erstellen der Helfer diese Werte setzen:
+#
+# input_number.lade_limit: 95
+# input_number.entlade_limit: 20
+# input_number.puffer_leistung: 100
+# input_number.min_solarprognose_schwelle: 3
+# input_number.zusaetzliche_entladung_prozent: 5
+# input_number.peak_schwelle_niedrig: 200
+# input_number.peak_schwelle_hoch: 600
+# ============================================================================

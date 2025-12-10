@@ -1,0 +1,400 @@
+# ============================================================================
+# EZHI Batterie-Regelung v1.0.0 - Kommentierte Version
+# ============================================================================
+# Intelligente Batterie-Steuerung für APsystems EZHI Hybrid-Wechselrichter
+# 
+# HAUPTFUNKTIONEN:
+# - 5W-Netzbilanz-Regelung mit adaptiver Peak-Erkennung
+# - Asymmetrische Rampe und Anti-Oszillations-Logik
+# - SOC-Schutz mit PV-Laden (kein Netzladen!)
+# - Solarprognose-basierte Entladetiefe
+# ============================================================================
+
+alias: EZHI Batterie-Regelung v1.0.0
+description: >
+  Intelligente Nulleinspeisung mit Batterie-Strategie für APsystems EZHI.
+  - 5W-Netzbilanz-Regelung mit adaptiver Peak-Erkennung
+  - Asymmetrische Rampe und Anti-Oszillations-Logik
+  - SOC-Schutz mit PV-Laden (kein Netzladen!)
+  - Solarprognose-basierte Entladetiefe
+
+# ============================================================================
+# TRIGGER: Reagiert auf jede Änderung der Netzleistung
+# ============================================================================
+triggers:
+  - entity_id:
+      - sensor.sm63_net_power  # Smart Meter Netzleistung (positiv=Bezug, negativ=Einspeisung)
+    trigger: state
+
+# ============================================================================
+# BEDINGUNGEN: Mindestabstand zwischen Ausführungen (0.3s)
+# ============================================================================
+# Verhindert zu häufige Ausführung bei schnellen Sensoränderungen
+conditions:
+  - condition: template
+    value_template: >
+      {% set last = this.attributes.last_triggered | default(0, true) %}
+      {{ (as_timestamp(now()) - (as_timestamp(last) | float(0))) > 0.3 }}
+
+# ============================================================================
+# VARIABLEN: Alle Berechnungen VOR den Aktionen
+# ============================================================================
+variables:
+  # --- SENSOR-WERTE ---
+  istwert: "{{ states('sensor.sm63_net_power') | float(0) }}"           # Aktuelle Netzleistung [W]
+  aktuell: "{{ states('number.ezhi_on_grid_power') | float(0) }}"       # Aktueller WR-Sollwert [W]
+  soc: "{{ states('sensor.battery_soc') | float(0) }}"                  # Batterie-Ladestand [%]
+  pv_power: "{{ states('sensor.pv_produktion_gesamt') | float(0) }}"    # PV-Produktion [W]
+  wr_istwert: "{{ states('sensor.ezhi_battery_power') | float(0) }}"    # Tatsächliche Batterieleistung [W]
+  
+  # --- WR-TIMEOUT-ERKENNUNG ---
+  # Erkennt wenn WR nicht reagiert (Sollwert hoch, aber keine Leistung)
+  wr_im_timeout: "{{ (aktuell | abs) > 50 and (wr_istwert | abs) < 10 }}"
+  
+  # --- BENUTZER-EINSTELLUNGEN (aus Helpern) ---
+  lade_limit: "{{ states('input_number.lade_limit') | float(95) }}"                    # Max. Ladestand [%]
+  entlade_limit_basis: "{{ states('input_number.entlade_limit') | float(20) }}"        # Min. Ladestand Basis [%]
+  puffer: "{{ states('input_number.puffer_leistung') | float(100) }}"                  # Toleranzbereich [W]
+  
+  # --- SOLARPROGNOSE-INTEGRATION ---
+  solarprognose_morgen: "{{ states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) }}"  # kWh
+  min_prognose_schwelle: "{{ states('input_number.min_solarprognose_schwelle') | float(3) }}"    # kWh Schwelle
+  zusaetzliche_entladung: "{{ states('input_number.zusaetzliche_entladung_prozent') | float(5) }}" # %
+  
+  # --- DYNAMISCHES ENTLADE-LIMIT ---
+  # Bei guter Solarprognose: Tiefere Entladung erlaubt (Batterie wird morgen wieder voll)
+  entlade_limit: |
+    {% if solarprognose_morgen >= min_prognose_schwelle %}
+      {{ (entlade_limit_basis - zusaetzliche_entladung) | float }}
+    {% else %}
+      {{ entlade_limit_basis | float }}
+    {% endif %}
+  
+  # --- REGELUNGS-KONSTANTEN ---
+  sollwert: -10          # Ziel-Netzbilanz [W] (leicht negativ = minimale Einspeisung)
+  min_inverter: -1200    # Max. Ladeleistung [W] (negativ = laden)
+  max_inverter: 1200     # Max. Entladeleistung [W] (positiv = entladen)
+  
+  # --- SOC-SCHUTZ PARAMETER ---
+  soc_schutz_puffer: 40          # Sicherheitspuffer beim PV-Laden [W]
+  soc_schutz_rampe: 70           # Rampe für langsames Hochfahren [W/Zyklus]
+  soc_schutz_min_ladung: 30      # Mindest-Ladeleistung bei Überschuss [W]
+  
+  # --- SOC-SCHUTZ LADEWERT-BERECHNUNG ---
+  # Komplexe Logik: PV-Laden erlauben, aber niemals Netzladen!
+  soc_schutz_ladewert: |
+    {% if pv_power > 10 and istwert < -50 %}
+      {# === PV-LADEN MÖGLICH: Überschuss vorhanden === #}
+      
+      {# Verfügbarer Überschuss (negativ = Einspeisung) #}
+      {% set ueberschuss = istwert | float %}
+      
+      {# Ziel MIT SICHERHEITSPUFFER: Weniger laden als verfügbar #}
+      {# Beispiel: istwert = -600W → ziel = -560W (40W Puffer) #}
+      {% set ziel = ueberschuss + soc_schutz_puffer %}
+      
+      {# Nicht mehr als Inverter-Maximum #}
+      {% if ziel < min_inverter %}
+        {% set ziel = min_inverter %}
+      {% endif %}
+      
+      {# Mindestens etwas laden wenn Überschuss da #}
+      {% if ziel > -soc_schutz_min_ladung %}
+        {% set ziel = -soc_schutz_min_ladung %}
+      {% endif %}
+      
+      {# === ASYMMETRISCHE RAMPEN-LOGIK === #}
+      {% if aktuell > ziel %}
+        {# WR lädt WENIGER als Ziel → LANGSAM mehr laden (sanfte Rampe) #}
+        {# Verhindert Oszillationen beim Hochfahren #}
+        {% set neuer_wert = aktuell - soc_schutz_rampe %}
+        {% if neuer_wert < ziel %}
+          {% set neuer_wert = ziel %}
+        {% endif %}
+        {{ neuer_wert | round(0) }}
+      {% else %}
+        {# WR lädt MEHR als Ziel → SOFORT auf Ziel reduzieren #}
+        {# KRITISCH: Verhindert ungewolltes Netzladen! #}
+        {{ ziel | round(0) }}
+      {% endif %}
+    {% else %}
+      {# === KEIN PV-LADEN MÖGLICH: Kein Überschuss === #}
+      0
+    {% endif %}
+  
+  # --- PEAK-ERKENNUNG ---
+  # Zwei Schwellen für unterschiedliche Reaktionsstärken
+  peak_schwelle_niedrig: "{{ states('input_number.peak_schwelle_niedrig') | float(200) }}"  # Kleine Peaks [W]
+  peak_schwelle_hoch: "{{ states('input_number.peak_schwelle_hoch') | float(600) }}"        # Große Peaks [W]
+  
+  # Peak-Level: 0=kein Peak, 1=kleiner Peak, 2=großer Peak
+  peak_level: |
+    {% if istwert > peak_schwelle_hoch %}
+      {{ 2 }}
+    {% elif istwert > peak_schwelle_niedrig %}
+      {{ 1 }}
+    {% else %}
+      {{ 0 }}
+    {% endif %}
+  
+  # --- REGELUNGS-FAKTOREN ---
+  faktor_basis: 0.25       # Normaler Regelungsfaktor (langsam, stabil)
+  faktor_peak_klein: 0.6   # Faktor bei kleinem Peak (schneller)
+  faktor_peak_gross: 1     # Faktor bei großem Peak (sofortige Reaktion)
+  
+  # --- ZEITBASIERTE DÄMPFUNG ---
+  # Verhindert Oszillationen nach Peaks
+  last_peak: >-
+    {{ states('input_datetime.last_peak') | as_timestamp | default(0) | float(0) }}
+  time_since_peak: "{{ as_timestamp(now()) - last_peak }}"
+  
+  # Post-Peak Dämpfung: Nach einem Peak langsamer reagieren
+  post_peak_damping: |
+    {% set t = time_since_peak %}
+    {% if t < 15 %}
+      {{ 0.4 }}    # 0-15s: Stark gedämpft (40%)
+    {% elif t < 45 %}
+      {{ 0.7 }}    # 15-45s: Mittel gedämpft (70%)
+    {% elif t < 90 %}
+      {{ 0.9 }}    # 45-90s: Leicht gedämpft (90%)
+    {% else %}
+      {{ 1.0 }}    # >90s: Keine Dämpfung (100%)
+    {% endif %}
+  
+  # Kombinierter Faktor aus Peak-Level und Dämpfung
+  faktor: >
+    {% set level = peak_level | int %}
+    {% set base_factor = faktor_peak_gross if level == 2 else (faktor_peak_klein if level == 1 else faktor_basis) %}
+    {{ (base_factor * post_peak_damping) | float }}
+  
+  # --- EXPONENTIELLER DECAY ---
+  # Zusätzliche Glättung über Zeit (e^(-t/tau))
+  tau: 45  # Zeitkonstante [s]
+  decay: |
+    {% set t = time_since_peak %}
+    {% if t > 120 %}
+      {{ 1.0 }}
+    {% else %}
+      {{ (2.718281828459045 ** (-t/tau)) | float }}
+    {% endif %}
+  
+  # --- DELTA-BERECHNUNG ---
+  # Wie stark soll der WR-Sollwert angepasst werden?
+  delta: |
+    {% set raw = (istwert | float) * (faktor | float) %}
+    {% set max_delta = 600 %}  # Maximale Änderung pro Zyklus
+    {% if raw > max_delta %}
+      {{ max_delta | float }}
+    {% elif raw < -max_delta %}
+      {{ -max_delta | float }}
+    {% else %}
+      {{ raw | float }}
+    {% endif %}
+  
+  # --- NEUER SOLLWERT ---
+  raw_target: "{{ (aktuell | float) + ((delta | float) * (decay | float)) }}"
+  
+  # Begrenzt auf Inverter-Limits
+  new_value: |
+    {% set target = raw_target | float %}
+    {% if target > max_inverter %}
+      {{ max_inverter }}
+    {% elif target < min_inverter %}
+      {{ min_inverter }}
+    {% else %}
+      {{ target | round(0) }}
+    {% endif %}
+
+# ============================================================================
+# AKTIONEN: Hauptlogik der Regelung
+# ============================================================================
+actions:
+  - choose:
+      # ================================================================
+      # FALL 1: SOC-SCHUTZ AKTIV (Batterie am Minimum)
+      # ================================================================
+      - conditions:
+          - condition: template
+            value_template: "{{ soc <= entlade_limit }}"
+        sequence:
+          # --- Logging: SOC-Schutz Status ---
+          - action: system_log.write
+            data:
+              message: >-
+                [SOC-SCHUTZ] {{ soc }}% ≤ {{ entlade_limit }}% – 
+                {% if pv_power > 10 and istwert < -50 %}
+                  PV-Laden: Überschuss={{ (istwert * -1) | round(0) }}W, 
+                  Ziel={{ (soc_schutz_ladewert * -1) | round(0) }}W (mit {{ soc_schutz_puffer }}W Puffer), 
+                  WR-Soll: {{ aktuell | round(0) }}W → {{ soc_schutz_ladewert }}W, 
+                  WR-Ist: {{ wr_istwert | round(0) }}W{% if wr_im_timeout %} [TIMEOUT]{% endif %}
+                {% elif pv_power > 10 %}
+                  Warte auf Überschuss (PV: {{ pv_power | round(0) }}W, Netz: {{ istwert | round(0) }}W)
+                {% else %}
+                  Kein PV ({{ pv_power | round(0) }}W), WR → 0W
+                {% endif %}
+              level: info
+          
+          # --- PV-LADEN NOTIFICATION (unabhängiger Boolean!) ---
+          # Wird gesendet wenn PV-Überschuss vorhanden ist
+          - if:
+              - condition: template
+                value_template: "{{ pv_power > 10 and istwert < -50 }}"
+              - condition: state
+                entity_id: input_boolean.pv_laden_notification_sent
+                state: "off"
+            then:
+              - data:
+                  title: 🔋🌞 SOC-Minimum + PV aktiv
+                  message: >-
+                    SOC: {{ soc }}% ≤ Limit: {{ entlade_limit }}% – 
+                    PV-Laden mit max {{ ((istwert * -1) - soc_schutz_puffer) | round(0) }}W 
+                    ({{ soc_schutz_puffer }}W Puffer)
+                action: persistent_notification.create
+              - target:
+                  entity_id: input_boolean.pv_laden_notification_sent
+                action: input_boolean.turn_on
+          
+          # --- SOC-SCHUTZ NOTIFICATION (kein PV verfügbar) ---
+          # Wird gesendet wenn SOC am Limit aber kein PV-Überschuss
+          - if:
+              - condition: template
+                value_template: "{{ not (pv_power > 10 and istwert < -50) }}"
+              - condition: state
+                entity_id: input_boolean.entlade_limit_notification_sent
+                state: "off"
+            then:
+              - data:
+                  title: 🔋 SOC-Schutz aktiv
+                  message: >-
+                    SOC: {{ soc }}% ≤ Limit: {{ entlade_limit }}% – 
+                    Warte auf PV-Überschuss (aktuell: PV={{ pv_power | round(0) }}W, 
+                    Netz={{ istwert | round(0) }}W)
+                action: persistent_notification.create
+              - target:
+                  entity_id: input_boolean.entlade_limit_notification_sent
+                action: input_boolean.turn_on
+              # Reset PV-Notification damit sie wieder kommt wenn PV startet
+              - target:
+                  entity_id: input_boolean.pv_laden_notification_sent
+                action: input_boolean.turn_off
+          
+          # --- WR-Sollwert setzen (PV-Laden oder 0) ---
+          - target:
+              entity_id: number.ezhi_on_grid_power
+            data:
+              value: "{{ soc_schutz_ladewert }}"
+            action: number.set_value
+          
+          - stop: ""  # Beende hier, keine weitere Regelung
+    
+    # ================================================================
+    # FALL 2: NORMALE REGELUNG (SOC über Minimum)
+    # ================================================================
+    default:
+      # --- Reset: BEIDE Notification-Booleans zurücksetzen ---
+      # Muss VOR dem Puffer-Check passieren, damit Reset auch bei stabiler Regelung erfolgt
+      - if:
+          - condition: template
+            value_template: "{{ soc > entlade_limit }}"
+        then:
+          - if:
+              - condition: state
+                entity_id: input_boolean.entlade_limit_notification_sent
+                state: "on"
+            then:
+              - target:
+                  entity_id: input_boolean.entlade_limit_notification_sent
+                action: input_boolean.turn_off
+          - if:
+              - condition: state
+                entity_id: input_boolean.pv_laden_notification_sent
+                state: "on"
+            then:
+              - target:
+                  entity_id: input_boolean.pv_laden_notification_sent
+                action: input_boolean.turn_off
+      
+      # --- Prüfe ob Regelung nötig (außerhalb Puffer-Zone) ---
+      - condition: template
+        value_template: "{{ (istwert > (sollwert + puffer) or istwert < (sollwert - puffer)) }}"
+      
+      # --- Lade-Limit erreicht: Notification senden ---
+      - if:
+          - condition: template
+            value_template: "{{ soc >= lade_limit and istwert < 0 }}"
+          - condition: state
+            entity_id: input_boolean.lade_limit_notification_sent
+            state: "off"
+        then:
+          - data:
+              message: 🌞 Batterie voll ({{ soc }}%)
+              level: info
+            action: system_log.write
+          - data:
+              title: 🌞 Batterie voll
+              message: "SOC: {{ soc }}% ≥ Lade-Limit {{ lade_limit }}%"
+            action: persistent_notification.create
+          - target:
+              entity_id: input_boolean.lade_limit_notification_sent
+            action: input_boolean.turn_on
+      
+      # --- Reset: Lade-Limit Notification zurücksetzen ---
+      - if:
+          - condition: template
+            value_template: "{{ soc < lade_limit }}"
+          - condition: state
+            entity_id: input_boolean.lade_limit_notification_sent
+            state: "on"
+        then:
+          - target:
+              entity_id: input_boolean.lade_limit_notification_sent
+            action: input_boolean.turn_off
+      
+      # --- HAUPTAKTION: WR-Sollwert setzen ---
+      - target:
+          entity_id: number.ezhi_on_grid_power
+        data:
+          value: "{{ new_value }}"
+        action: number.set_value
+      
+      # --- Logging: Regelungsdetails ---
+      - data:
+          message: >
+            [ACTION] Regelung: ist={{ istwert }}W, WR_alt={{ aktuell }}W,
+            WR_neu={{ new_value }}W, delta={{ delta }}W, faktor={{ faktor }},
+            peak_level={{ peak_level }}, decay={{ decay }}, 
+            post_peak_damping={{ post_peak_damping }}
+          level: info
+        action: system_log.write
+      
+      # --- Peak-Notification (max alle 30s) ---
+      - if:
+          - condition: template
+            value_template: "{{ peak_level > 0 }}"
+        then:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ last_peak == 0 or (as_timestamp(now()) - last_peak) > 30 }}
+                sequence:
+                  - data:
+                      title: >
+                        {% if peak_level == 2 %} ⚡ GROßER PEAK erkannt 
+                        {% else %} ⚡ Peak erkannt {% endif %}
+                      message: >
+                        Netzlast {{ istwert }}W — 
+                        {% if peak_level == 2 %} Verstärkte Reaktion (Faktor {{ faktor }})
+                        {% else %} Moderate Reaktion (Faktor {{ faktor }}) {% endif %}
+                    action: persistent_notification.create
+                  - target:
+                      entity_id: input_datetime.last_peak
+                    data:
+                      timestamp: "{{ as_timestamp(now()) }}"
+                    action: input_datetime.set_datetime
+
+# ============================================================================
+# MODUS: Single - Nur eine Instanz gleichzeitig
+# ============================================================================
+mode: single
+max_exceeded: silent  # Keine Warnung wenn übersprungen
