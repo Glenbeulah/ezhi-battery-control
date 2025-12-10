@@ -235,7 +235,6 @@ views:
                 name: Netzbilanz-Puffer
               - entity: input_number.min_solarprognose_schwelle
               - entity: input_number.zusaetzliche_entladung_prozent
-              - entity: input_number.peak_schwelle
               - entity: input_number.peak_schwelle_niedrig
               - entity: input_number.peak_schwelle_hoch
 

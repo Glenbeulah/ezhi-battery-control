@@ -64,15 +64,6 @@ input_number:
     mode: slider
   
   # --- Peak-Erkennung ---
-  peak_schwelle:
-    name: Peak-Schwelle (Legacy)
-    min: 100
-    max: 1000
-    step: 50
-    unit_of_measurement: "W"
-    icon: mdi:chart-bell-curve
-    mode: slider
-  
   peak_schwelle_niedrig:
     name: Peak-Schwelle Niedrig
     min: 50

@@ -205,15 +205,17 @@ Nach der Installation muss die Automation **einmal manuell gestartet** werden, u
 
 ### Empfohlene Anfangswerte
 
-| Parameter | Empfohlener Wert |
-|-----------|------------------|
-| Lade-Limit | 95% |
-| Entlade-Limit | 20% |
-| Puffer-Leistung | 100W |
-| Peak-Schwelle Niedrig | 200W |
-| Peak-Schwelle Hoch | 600W |
-| Min. Solarprognose | 3 kWh |
-| Zusätzliche Entladung | 5% |
+### Empfohlene Anfangswerte
+
+| Parameter | Empfohlener Wert | Scharfe Einstellung |
+|-----------|------------------|---------------------|
+| Lade-Limit | 95% | 100% |
+| Entlade-Limit | 20% | 12% |
+| Puffer-Leistung | 50W | 10W |
+| Peak-Schwelle Niedrig | 200W | 250W |
+| Peak-Schwelle Hoch | 600W | 600W |
+| Min. Solarprognose | 3 kWh | 0kWh |
+| Zusätzliche Entladung | 5% | 0% |
 
 ---
 
