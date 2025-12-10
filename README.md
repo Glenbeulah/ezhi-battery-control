@@ -43,7 +43,7 @@ Intelligente Nulleinspeisung mit Batterie-Strategie für **APsystems EZHI Hybrid
 |-------------|--------------|------|
 | **APsystems EZHI** | Wechselrichter-Steuerung | [kamilkosek/EZHI](https://github.com/kamilkosek/EZHI) |
 | **Smart Meter** | Netzleistungs-Messung | Je nach Gerät |
-| **Solcast** (optional) | Solarprognose | [oziee/ha-solcast-solar](https://github.com/oziee/ha-solcast-solar) |
+| **Solcast** (optional) | Solarprognose | [BJReplay/ha-solcast-solar](https://github.com/BJReplay/ha-solcast-solar) |
 
 ### HACS Frontend (für Dashboard)
 
