@@ -41,7 +41,7 @@ Intelligente Nulleinspeisung mit Batterie-Strategie für **APsystems EZHI Hybrid
 
 | Integration | Beschreibung | Link |
 |-------------|--------------|------|
-| **APsystems EZHI** | Wechselrichter-Steuerung | [kamilkoze/apsystems_ezhi](https://github.com/kamilkoze/apsystems_ezhi) |
+| **APsystems EZHI** | Wechselrichter-Steuerung | [kamilkosek/EZHI](https://github.com/kamilkosek/EZHI) |
 | **Smart Meter** | Netzleistungs-Messung | Je nach Gerät |
 | **Solcast** (optional) | Solarprognose | [oziee/ha-solcast-solar](https://github.com/oziee/ha-solcast-solar) |
 
@@ -339,6 +339,6 @@ Pull Requests sind willkommen! Bitte erstelle zuerst ein Issue für größere Ä
 
 ## 🙏 Credits
 
-- [kamilkoze](https://github.com/kamilkoze) - APsystems EZHI Integration
+- [kamilkosek](https://github.com/kamilkosek) - APsystems EZHI Integration
 - [piitaya](https://github.com/piitaya) - Mushroom Cards
 - [flixlix](https://github.com/flixlix) - Power Flow Card Plus

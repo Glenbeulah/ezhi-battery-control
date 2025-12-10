@@ -23,7 +23,7 @@ blueprint:
     - System-Logging und Notifications
     
     **Voraussetzungen:**
-    - APsystems EZHI Integration (von kamilkoze)
+    - APsystems EZHI Integration (kamilkosek/EZHI)
     - Smart Meter mit Netzleistungs-Sensor
     - Optionale Solcast-Integration für Prognose
   domain: automation
