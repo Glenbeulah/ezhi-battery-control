@@ -91,7 +91,7 @@ variables:
       
       {# Ziel MIT SICHERHEITSPUFFER: Weniger laden als verfügbar #}
       {# Beispiel: istwert = -600W → ziel = -560W (40W Puffer) #}
-      {% set ziel = ueberschuss + soc_schutz_puffer %}
+      {% set ziel = ueberschuss + aktuell + soc_schutz_puffer %}
       
       {# Nicht mehr als Inverter-Maximum #}
       {% if ziel < min_inverter %}

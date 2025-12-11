@@ -287,7 +287,7 @@ variables:
   soc_schutz_ladewert: |
     {% if pv_power > 10 and istwert < -50 %}
       {% set ueberschuss = istwert | float %}
-      {% set ziel = ueberschuss + soc_schutz_puffer %}
+      {% set ziel = ueberschuss + aktuell + soc_schutz_puffer %}
       {% if ziel < min_inverter %}
         {% set ziel = min_inverter %}
       {% endif %}
