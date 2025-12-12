@@ -3,39 +3,42 @@
 # ============================================================================
 # Intelligente Batterie-Steuerung für APsystems EZHI Hybrid-Wechselrichter
 # 
-# LIGHT VERSION: Keine zusätzlichen Helfer nötig!
-# Alle Werte werden direkt im Blueprint konfiguriert.
+# LIGHT VERSION: Nur 1 Helfer nötig (input_datetime.last_peak)
+# Alle anderen Werte werden direkt im Blueprint konfiguriert.
 #
 # INSTALLATION:
 # 1. Diese Datei nach /config/blueprints/automation/ezhi/ kopieren
-# 2. In Home Assistant: Einstellungen → Automatisierungen → Blueprint erstellen
-# 3. Nur die 4 Sensoren auswählen - fertig!
+# 2. Einen input_datetime Helfer erstellen: "last_peak" (mit Datum + Zeit)
+# 3. In Home Assistant: Einstellungen → Automatisierungen → Blueprint erstellen
+# 4. Die 4 Sensoren + 1 Helfer auswählen - fertig!
 # ============================================================================
 
 blueprint:
   name: EZHI Batterie-Regelung v1.0.0 LIGHT
   description: |
-    Intelligente Nulleinspeisung für APsystems EZHI - **ohne zusätzliche Helfer!**
+    Intelligente Nulleinspeisung für APsystems EZHI - **nur 1 Helfer nötig!**
     
     **Features:**
     - 5W-Netzbilanz-Regelung mit Peak-Erkennung
+    - Zeitbasierte Peak-Dämpfung und Decay
     - Asymmetrische Rampe (schnell runter, langsam hoch)
     - SOC-Schutz mit PV-Laden (kein Netzladen!)
     - Alle Parameter direkt im Blueprint einstellbar
     
-    **Voraussetzungen:**
+    **Benötigt:**
     - APsystems EZHI Integration (kamilkosek/EZHI)
     - Smart Meter mit Netzleistungs-Sensor
+    - 1x input_datetime Helfer (last_peak)
     
     **Nicht enthalten (siehe Vollversion):**
-    - Zeitbasierte Peak-Dämpfung
     - Solarprognose-Integration
     - Notifications
+    - Dashboard-steuerbare Parameter
   domain: automation
   author: Glenbeulah
   
   input:
-    # === SENSOREN (nur diese 4 werden benötigt!) ===
+    # === SENSOREN (4 Sensoren + 1 Helfer) ===
     grid_power_sensor:
       name: Netzleistungs-Sensor
       description: "Sensor für Netzleistung in Watt (positiv=Bezug, negativ=Einspeisung)"
@@ -66,6 +69,14 @@ blueprint:
         entity:
           domain: sensor
           device_class: power
+    
+    # === EINZIGER HELFER ===
+    peak_timestamp_helper:
+      name: Peak-Zeitstempel Helper
+      description: "input_datetime.last_peak - für Peak-Dämpfung (mit Datum + Zeit)"
+      selector:
+        entity:
+          domain: input_datetime
     
     # === BATTERIE-LIMITS ===
     charge_limit:
@@ -183,6 +194,7 @@ variables:
   wr_number: !input ezhi_on_grid_power
   soc_sensor: !input battery_soc_sensor
   pv_sensor: !input pv_power_sensor
+  peak_time_input: !input peak_timestamp_helper
   
   # Blueprint-Parameter
   lade_limit: !input charge_limit
@@ -244,18 +256,39 @@ variables:
   faktor_peak_klein: 0.6
   faktor_peak_gross: 1.0
   
-  # Faktor basierend auf Peak-Level (ohne zeitbasierte Dämpfung)
-  faktor: >
-    {% set level = peak_level | int %}
-    {% if level == 2 %}
-      {{ faktor_peak_gross }}
-    {% elif level == 1 %}
-      {{ faktor_peak_klein }}
+  # Zeitbasierte Peak-Dämpfung
+  last_peak: "{{ states(peak_time_input) | as_timestamp | default(0) | float(0) }}"
+  time_since_peak: "{{ as_timestamp(now()) - last_peak }}"
+  
+  post_peak_damping: |
+    {% set t = time_since_peak %}
+    {% if t < 15 %}
+      0.4
+    {% elif t < 45 %}
+      0.7
+    {% elif t < 90 %}
+      0.9
     {% else %}
-      {{ faktor_basis }}
+      1.0
     {% endif %}
   
-  # Delta-Berechnung mit Begrenzung
+  # Exponentieller Decay
+  tau: 45
+  decay: |
+    {% set t = time_since_peak %}
+    {% if t > 120 %}
+      1.0
+    {% else %}
+      {{ (2.718281828459045 ** (-t/tau)) | float }}
+    {% endif %}
+  
+  # Faktor mit Dämpfung
+  faktor: >
+    {% set level = peak_level | int %}
+    {% set base_factor = faktor_peak_gross if level == 2 else (faktor_peak_klein if level == 1 else faktor_basis) %}
+    {{ (base_factor * post_peak_damping) | float }}
+  
+  # Delta-Berechnung mit Begrenzung und Decay
   delta: |
     {% set raw = (istwert | float) * (faktor | float) %}
     {% set max_delta = 600 %}
@@ -267,9 +300,9 @@ variables:
       {{ raw | round(0) }}
     {% endif %}
   
-  # Neuer WR-Sollwert
+  # Neuer WR-Sollwert mit Decay
   new_value: |
-    {% set target = (aktuell | float) + (delta | float) %}
+    {% set target = (aktuell | float) + ((delta | float) * (decay | float)) %}
     {% if target > max_inverter %}
       {{ max_inverter }}
     {% elif target < min_inverter %}
@@ -307,6 +340,17 @@ action:
           entity_id: !input ezhi_on_grid_power
         data:
           value: "{{ new_value }}"
+      
+      # Peak-Timestamp aktualisieren
+      - if:
+          - condition: template
+            value_template: "{{ peak_level > 0 and (last_peak == 0 or time_since_peak > 30) }}"
+        then:
+          - service: input_datetime.set_datetime
+            target:
+              entity_id: !input peak_timestamp_helper
+            data:
+              timestamp: "{{ as_timestamp(now()) }}"
 
 mode: single
 max_exceeded: silent

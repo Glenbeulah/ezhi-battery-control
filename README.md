@@ -106,16 +106,17 @@ Je nach Gerät unterschiedlich. Bei Shelly: Native Integration mit 1s Update.
    - "EZHI Batterie-Regelung v1.0.0" auswählen
    - Deine Entities zuordnen
 
-### Option 3: LIGHT Blueprint (keine Helfer nötig!)
+### Option 3: LIGHT Blueprint (nur 1 Helfer!)
 
-Für alle die **keine Helfer anlegen** möchten:
+Für alle die **möglichst wenig Helfer** anlegen möchten:
 
-1. **Blueprint kopieren**: `blueprints/ezhi_battery_control_light.yaml`
-2. **Nur 4 Sensoren auswählen** - fertig!
+1. **Einen Helfer erstellen**: `input_datetime.last_peak` (mit Datum + Zeit)
+2. **Blueprint kopieren**: `blueprints/ezhi_battery_control_light.yaml`
+3. **4 Sensoren + 1 Helfer auswählen** - fertig!
 
-Alle Parameter werden direkt im Blueprint konfiguriert. Ideal wenn man Werte nur 2-3x pro Jahr ändert.
+Alle anderen Parameter werden direkt im Blueprint konfiguriert. Ideal wenn man Werte nur 2-3x pro Jahr ändert.
 
-**Nicht enthalten:** Zeitbasierte Peak-Dämpfung, Solarprognose, Notifications
+**Nicht enthalten:** Solarprognose, Notifications, Dashboard-steuerbare Parameter
 
 ---
 
@@ -252,7 +253,7 @@ Nach der Installation muss die Automation **einmal manuell gestartet** werden, u
 | `helpers.yaml` | Alle benötigten Helfer |
 | `blueprints/ezhi_battery_control.yaml` | Blueprint v1.0.0 mit Logging/Notifications |
 | `blueprints/ezhi_battery_control_minimal.yaml` | Blueprint v1.0.0 minimal |
-| `blueprints/ezhi_battery_control_light.yaml` | **LIGHT: Keine Helfer nötig!** |
+| `blueprints/ezhi_battery_control_light.yaml` | **LIGHT: Nur 1 Helfer nötig!** |
 
 ---
 
