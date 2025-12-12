@@ -1,0 +1,312 @@
+# ============================================================================
+# EZHI Batterie-Regelung Blueprint v1.0.0 - LIGHT
+# ============================================================================
+# Intelligente Batterie-Steuerung für APsystems EZHI Hybrid-Wechselrichter
+# 
+# LIGHT VERSION: Keine zusätzlichen Helfer nötig!
+# Alle Werte werden direkt im Blueprint konfiguriert.
+#
+# INSTALLATION:
+# 1. Diese Datei nach /config/blueprints/automation/ezhi/ kopieren
+# 2. In Home Assistant: Einstellungen → Automatisierungen → Blueprint erstellen
+# 3. Nur die 4 Sensoren auswählen - fertig!
+# ============================================================================
+
+blueprint:
+  name: EZHI Batterie-Regelung v1.0.0 LIGHT
+  description: |
+    Intelligente Nulleinspeisung für APsystems EZHI - **ohne zusätzliche Helfer!**
+    
+    **Features:**
+    - 5W-Netzbilanz-Regelung mit Peak-Erkennung
+    - Asymmetrische Rampe (schnell runter, langsam hoch)
+    - SOC-Schutz mit PV-Laden (kein Netzladen!)
+    - Alle Parameter direkt im Blueprint einstellbar
+    
+    **Voraussetzungen:**
+    - APsystems EZHI Integration (kamilkosek/EZHI)
+    - Smart Meter mit Netzleistungs-Sensor
+    
+    **Nicht enthalten (siehe Vollversion):**
+    - Zeitbasierte Peak-Dämpfung
+    - Solarprognose-Integration
+    - Notifications
+  domain: automation
+  author: Glenbeulah
+  
+  input:
+    # === SENSOREN (nur diese 4 werden benötigt!) ===
+    grid_power_sensor:
+      name: Netzleistungs-Sensor
+      description: "Sensor für Netzleistung in Watt (positiv=Bezug, negativ=Einspeisung)"
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+    
+    ezhi_on_grid_power:
+      name: EZHI On-Grid Power
+      description: "number.ezhi_on_grid_power - Sollwert für den Wechselrichter"
+      selector:
+        entity:
+          domain: number
+    
+    battery_soc_sensor:
+      name: Batterie SOC Sensor
+      description: "Batterie-Ladestand in Prozent"
+      selector:
+        entity:
+          domain: sensor
+          device_class: battery
+    
+    pv_power_sensor:
+      name: PV-Leistungs-Sensor
+      description: "Gesamte PV-Produktion in Watt"
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+    
+    # === BATTERIE-LIMITS ===
+    charge_limit:
+      name: Lade-Limit
+      description: "Maximaler Ladestand in Prozent"
+      default: 95
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+    
+    discharge_limit:
+      name: Entlade-Limit
+      description: "Minimaler Ladestand in Prozent"
+      default: 20
+      selector:
+        number:
+          min: 5
+          max: 50
+          step: 1
+          unit_of_measurement: "%"
+    
+    # === REGELUNGSPARAMETER ===
+    target_grid_power:
+      name: Ziel-Netzbilanz
+      description: "Ziel-Wert für Netzleistung (Standard: -10W = leichte Einspeisung)"
+      default: -10
+      selector:
+        number:
+          min: -100
+          max: 100
+          step: 5
+          unit_of_measurement: W
+    
+    buffer_power:
+      name: Netzbilanz-Puffer
+      description: "Toleranz-Zone um den Zielwert (keine Regelung innerhalb)"
+      default: 100
+      selector:
+        number:
+          min: 20
+          max: 500
+          step: 10
+          unit_of_measurement: W
+    
+    min_inverter_power:
+      name: Max. Ladeleistung
+      description: "Maximale Ladeleistung (negativer Wert)"
+      default: -1200
+      selector:
+        number:
+          min: -3000
+          max: 0
+          step: 100
+          unit_of_measurement: W
+    
+    max_inverter_power:
+      name: Max. Entladeleistung
+      description: "Maximale Entladeleistung (positiver Wert)"
+      default: 1200
+      selector:
+        number:
+          min: 0
+          max: 3000
+          step: 100
+          unit_of_measurement: W
+    
+    # === PEAK-ERKENNUNG ===
+    peak_threshold_low:
+      name: Peak-Schwelle Niedrig
+      description: "Ab dieser Netzlast: moderate Reaktion (Faktor 0.6)"
+      default: 200
+      selector:
+        number:
+          min: 50
+          max: 500
+          step: 25
+          unit_of_measurement: W
+    
+    peak_threshold_high:
+      name: Peak-Schwelle Hoch
+      description: "Ab dieser Netzlast: verstärkte Reaktion (Faktor 1.0)"
+      default: 600
+      selector:
+        number:
+          min: 200
+          max: 1500
+          step: 50
+          unit_of_measurement: W
+
+# ============================================================================
+# TRIGGER
+# ============================================================================
+trigger:
+  - platform: state
+    entity_id: !input grid_power_sensor
+
+# ============================================================================
+# BEDINGUNG: Mindestabstand zwischen Ausführungen (0.3s)
+# ============================================================================
+condition:
+  - condition: template
+    value_template: >
+      {% set last = this.attributes.last_triggered | default(0, true) %}
+      {{ (as_timestamp(now()) - (as_timestamp(last) | float(0))) > 0.3 }}
+
+# ============================================================================
+# VARIABLEN
+# ============================================================================
+variables:
+  # Input-Referenzen
+  grid_sensor: !input grid_power_sensor
+  wr_number: !input ezhi_on_grid_power
+  soc_sensor: !input battery_soc_sensor
+  pv_sensor: !input pv_power_sensor
+  
+  # Blueprint-Parameter
+  lade_limit: !input charge_limit
+  entlade_limit: !input discharge_limit
+  sollwert: !input target_grid_power
+  puffer: !input buffer_power
+  min_inverter: !input min_inverter_power
+  max_inverter: !input max_inverter_power
+  peak_schwelle_niedrig: !input peak_threshold_low
+  peak_schwelle_hoch: !input peak_threshold_high
+  
+  # Sensor-Werte
+  istwert: "{{ states(grid_sensor) | float(0) }}"
+  aktuell: "{{ states(wr_number) | float(0) }}"
+  soc: "{{ states(soc_sensor) | float(0) }}"
+  pv_power: "{{ states(pv_sensor) | float(0) }}"
+  
+  # SOC-Schutz Parameter (fest)
+  soc_schutz_puffer: 40
+  soc_schutz_rampe: 70
+  soc_schutz_min_ladung: 30
+  
+  # SOC-Schutz Ladewert-Berechnung
+  soc_schutz_ladewert: |
+    {% if pv_power > 10 and istwert < -50 %}
+      {% set ueberschuss = istwert | float %}
+      {% set ziel = ueberschuss + aktuell + soc_schutz_puffer %}
+      {% if ziel < min_inverter %}
+        {% set ziel = min_inverter %}
+      {% endif %}
+      {% if ziel > -soc_schutz_min_ladung %}
+        {% set ziel = -soc_schutz_min_ladung %}
+      {% endif %}
+      {% if aktuell > ziel %}
+        {% set neuer_wert = aktuell - soc_schutz_rampe %}
+        {% if neuer_wert < ziel %}
+          {% set neuer_wert = ziel %}
+        {% endif %}
+        {{ neuer_wert | round(0) }}
+      {% else %}
+        {{ ziel | round(0) }}
+      {% endif %}
+    {% else %}
+      0
+    {% endif %}
+  
+  # Peak-Erkennung
+  peak_level: |
+    {% if istwert > peak_schwelle_hoch %}
+      2
+    {% elif istwert > peak_schwelle_niedrig %}
+      1
+    {% else %}
+      0
+    {% endif %}
+  
+  # Regelungsfaktoren (fest)
+  faktor_basis: 0.25
+  faktor_peak_klein: 0.6
+  faktor_peak_gross: 1.0
+  
+  # Faktor basierend auf Peak-Level (ohne zeitbasierte Dämpfung)
+  faktor: >
+    {% set level = peak_level | int %}
+    {% if level == 2 %}
+      {{ faktor_peak_gross }}
+    {% elif level == 1 %}
+      {{ faktor_peak_klein }}
+    {% else %}
+      {{ faktor_basis }}
+    {% endif %}
+  
+  # Delta-Berechnung mit Begrenzung
+  delta: |
+    {% set raw = (istwert | float) * (faktor | float) %}
+    {% set max_delta = 600 %}
+    {% if raw > max_delta %}
+      {{ max_delta }}
+    {% elif raw < -max_delta %}
+      {{ -max_delta }}
+    {% else %}
+      {{ raw | round(0) }}
+    {% endif %}
+  
+  # Neuer WR-Sollwert
+  new_value: |
+    {% set target = (aktuell | float) + (delta | float) %}
+    {% if target > max_inverter %}
+      {{ max_inverter }}
+    {% elif target < min_inverter %}
+      {{ min_inverter }}
+    {% else %}
+      {{ target | round(0) }}
+    {% endif %}
+
+# ============================================================================
+# AKTIONEN
+# ============================================================================
+action:
+  - choose:
+      # === SOC-SCHUTZ ===
+      - conditions:
+          - condition: template
+            value_template: "{{ soc <= entlade_limit }}"
+        sequence:
+          - service: number.set_value
+            target:
+              entity_id: !input ezhi_on_grid_power
+            data:
+              value: "{{ soc_schutz_ladewert }}"
+          - stop: ""
+    
+    # === NORMALE REGELUNG ===
+    default:
+      # Nur regeln wenn außerhalb Puffer-Zone
+      - condition: template
+        value_template: "{{ (istwert > (sollwert + puffer) or istwert < (sollwert - puffer)) }}"
+      
+      # WR-Sollwert setzen
+      - service: number.set_value
+        target:
+          entity_id: !input ezhi_on_grid_power
+        data:
+          value: "{{ new_value }}"
+
+mode: single
+max_exceeded: silent
