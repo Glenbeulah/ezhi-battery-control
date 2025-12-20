@@ -1,0 +1,346 @@
+# ============================================================================
+# EZHI Spot-Steuerung v1.1.0-beta - Dashboard
+# ============================================================================
+# Installation:
+# 1. Einstellungen → Dashboards → Dashboard hinzufügen → "EZHI Spot"
+# 2. Dashboard öffnen → Bearbeiten → Raw-Konfigurationseditor
+# 3. Diesen Inhalt einfügen
+#
+# Benötigt: 
+# - card-mod (HACS) für Farben - optional
+# - apexcharts-card (HACS) für Grafiken - optional
+# ============================================================================
+
+title: EZHI Spot-Steuerung
+views:
+  - title: Übersicht
+    path: uebersicht
+    icon: mdi:battery-charging
+    cards:
+      # ================================================================
+      # HEADER: Aktuelle Empfehlung
+      # ================================================================
+      - type: markdown
+        content: |
+          # 🔋 EZHI Spot-Steuerung
+          **Beta v1.1.0** - Dynamische Batterie-Optimierung
+
+      - type: horizontal-stack
+        cards:
+          # Status-Karte groß
+          - type: custom:mushroom-template-card
+            primary: "{{ states('sensor.ezhi_spot_action') | upper }}"
+            secondary: "{{ states('sensor.ezhi_spot_grund') }}"
+            icon: >
+              {% set action = states('sensor.ezhi_spot_action') %}
+              {% if action == 'laden' %}mdi:battery-charging-high
+              {% elif action == 'entladen' %}mdi:battery-arrow-down-outline
+              {% elif action == 'halten' %}mdi:battery-lock
+              {% else %}mdi:battery-50{% endif %}
+            icon_color: >
+              {% set action = states('sensor.ezhi_spot_action') %}
+              {% if action == 'laden' %}green
+              {% elif action == 'entladen' %}red
+              {% elif action == 'halten' %}amber
+              {% else %}blue{% endif %}
+            layout: vertical
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_spot_empfehlung
+            card_mod:
+              style: |
+                ha-card {
+                  --primary-text-color: {% set action = states('sensor.ezhi_spot_action') %}
+                    {% if action == 'laden' %}var(--success-color)
+                    {% elif action == 'entladen' %}var(--error-color)
+                    {% elif action == 'halten' %}var(--warning-color)
+                    {% else %}var(--info-color){% endif %};
+                }
+
+          # Modus-Auswahl
+          - type: custom:mushroom-select-card
+            entity: input_select.ezhi_modus
+            name: Betriebsmodus
+            icon: mdi:auto-fix
+
+      # ================================================================
+      # FALLBACK ohne Mushroom Cards
+      # ================================================================
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.ezhi_spot_action
+            state_not: "unavailable"
+        card:
+          type: entities
+          title: Status (Fallback)
+          show_header_toggle: false
+          entities:
+            - entity: sensor.ezhi_spot_action
+              name: Empfehlung
+            - entity: sensor.ezhi_spot_grund
+              name: Begründung
+            - entity: input_select.ezhi_modus
+              name: Modus
+
+      # ================================================================
+      # SPOT-PREISE
+      # ================================================================
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: "## 💰 Strompreis"
+
+          - type: horizontal-stack
+            cards:
+              - type: entity
+                entity: sensor.epex_spot_data_market_price
+                name: Aktuell
+                unit: ct/kWh
+                icon: mdi:currency-eur
+
+              - type: entity
+                entity: sensor.epex_spot_data_rank
+                name: Rang
+                icon: mdi:podium
+
+              - type: entity
+                entity: sensor.epex_spot_data_quantile
+                name: Quantil
+                icon: mdi:percent
+
+          # Preis-Gauge
+          - type: gauge
+            entity: sensor.epex_spot_data_market_price
+            name: Strompreis
+            unit: ct/kWh
+            min: -5
+            max: 50
+            severity:
+              green: -5
+              yellow: 15
+              red: 30
+            needle: true
+
+      # ================================================================
+      # ENERGIE-BILANZ
+      # ================================================================
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: "## ⚡ Energie-Bilanz"
+
+          - type: horizontal-stack
+            cards:
+              - type: entity
+                entity: sensor.ezhi_erwarteter_verbrauch_stunde
+                name: Verbrauch/h
+                icon: mdi:home-lightning-bolt
+
+              - type: entity
+                entity: sensor.ezhi_energie_bilanz_4h
+                name: Bilanz 4h
+                icon: mdi:scale-balance
+
+              - type: entity
+                entity: sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute
+                name: PV Rest
+                unit: kWh
+                icon: mdi:solar-power
+
+          - type: entities
+            entities:
+              - type: attribute
+                entity: sensor.ezhi_erwarteter_verbrauch_stunde
+                attribute: naechste_stunde
+                name: Verbrauch nächste Stunde
+                suffix: " Wh"
+              - type: attribute
+                entity: sensor.ezhi_erwarteter_verbrauch_stunde
+                attribute: naechste_4_stunden
+                name: Verbrauch nächste 4h
+                suffix: " Wh"
+              - type: attribute
+                entity: sensor.ezhi_energie_bilanz_4h
+                attribute: bewertung
+                name: Bewertung
+
+      # ================================================================
+      # BATTERIE-STATUS
+      # ================================================================
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: "## 🔋 Batterie"
+
+          - type: horizontal-stack
+            cards:
+              - type: gauge
+                entity: sensor.ezhi_800_battery_soc
+                name: SOC
+                min: 0
+                max: 100
+                severity:
+                  red: 0
+                  yellow: 20
+                  green: 50
+                needle: true
+
+              - type: entity
+                entity: sensor.ezhi_800_battery_power
+                name: Leistung
+                icon: mdi:lightning-bolt
+
+          - type: entities
+            title: Dynamische Limits
+            entities:
+              - entity: sensor.ezhi_dynamisches_entlade_limit
+                name: Entlade-Limit (dynamisch)
+              - entity: input_number.entlade_limit
+                name: Entlade-Limit (Basis)
+              - entity: sensor.ezhi_spot_netzladen_max_soc
+                name: Max SOC Netzladen
+
+      # ================================================================
+      # SPOT SCORE
+      # ================================================================
+      - type: gauge
+        entity: sensor.ezhi_spot_score
+        name: Spot Score
+        min: -100
+        max: 100
+        severity:
+          red: -100
+          yellow: -30
+          green: 30
+        needle: true
+
+      # ================================================================
+      # VERBRAUCHSPROFIL (falls ApexCharts installiert)
+      # ================================================================
+      - type: markdown
+        content: |
+          ## 📊 Verbrauchsprofil
+          *Durchschnitt der letzten 7 Tage pro Stunde*
+
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Verbrauch nach Tageszeit
+          show_states: false
+        graph_span: 24h
+        span:
+          start: day
+        apex_config:
+          chart:
+            height: 200px
+          xaxis:
+            labels:
+              format: HH:mm
+        series:
+          - entity: sensor.ezhi_erwarteter_verbrauch_stunde
+            name: Verbrauch
+            type: column
+            color: "#039be5"
+            data_generator: |
+              const data = entity.attributes.profil_json;
+              if (!data || data === 'unknown') return [];
+              try {
+                const json = JSON.parse(data);
+                const result = [];
+                const now = new Date();
+                const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                for (let h = 0; h < 24; h++) {
+                  const hour = h.toString().padStart(2, '0');
+                  const value = json[hour] || 0;
+                  const time = new Date(startOfDay.getTime() + h * 3600000);
+                  result.push([time.getTime(), value]);
+                }
+                return result;
+              } catch (e) {
+                return [];
+              }
+
+      # ================================================================
+      # HISTORY GRAPH (Standard HA)
+      # ================================================================
+      - type: history-graph
+        title: Verlauf (24h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.ezhi_spot_action
+            name: Aktion
+          - entity: sensor.epex_spot_data_rank
+            name: Preis-Rang
+          - entity: sensor.ezhi_800_battery_soc
+            name: SOC
+
+      # ================================================================
+      # ALLE SENSOREN (Debug)
+      # ================================================================
+      - type: entities
+        title: 🔧 Debug / Alle Sensoren
+        show_header_toggle: false
+        entities:
+          - type: section
+            label: Spot-Sensoren
+          - entity: sensor.ezhi_spot_action
+          - entity: sensor.ezhi_spot_grund
+          - entity: sensor.ezhi_spot_score
+          - entity: sensor.ezhi_spot_empfehlung
+          - type: section
+            label: Dynamische Werte
+          - entity: sensor.ezhi_dynamisches_entlade_limit
+          - entity: sensor.ezhi_spot_netzladen_max_soc
+          - type: section
+            label: Verbrauch
+          - entity: sensor.ezhi_verbrauchsprofil_7_tage
+          - entity: sensor.ezhi_erwarteter_verbrauch_stunde
+          - entity: sensor.ezhi_energie_bilanz_4h
+          - type: section
+            label: Externe Daten
+          - entity: sensor.epex_spot_data_market_price
+          - entity: sensor.epex_spot_data_rank
+          - entity: sensor.epex_spot_data_quantile
+          - entity: sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute
+          - entity: sensor.solcast_pv_forecast_prognose_morgen
+
+# ============================================================================
+# ALTERNATIVE: Einfaches Dashboard ohne HACS Cards
+# ============================================================================
+# Falls du keine HACS-Cards hast, kannst du auch nur diesen Teil verwenden:
+#
+# views:
+#   - title: EZHI Spot
+#     cards:
+#       - type: entities
+#         title: Spot-Steuerung
+#         entities:
+#           - entity: input_select.ezhi_modus
+#           - entity: sensor.ezhi_spot_action
+#           - entity: sensor.ezhi_spot_grund
+#           - type: divider
+#           - entity: sensor.epex_spot_data_market_price
+#           - entity: sensor.epex_spot_data_rank
+#           - type: divider
+#           - entity: sensor.ezhi_erwarteter_verbrauch_stunde
+#           - entity: sensor.ezhi_energie_bilanz_4h
+#           - type: divider
+#           - entity: sensor.ezhi_dynamisches_entlade_limit
+#           - entity: sensor.ezhi_spot_netzladen_max_soc
+#
+#       - type: gauge
+#         entity: sensor.epex_spot_data_market_price
+#         min: -5
+#         max: 50
+#         severity:
+#           green: -5
+#           yellow: 15
+#           red: 30
+#
+#       - type: history-graph
+#         hours_to_show: 24
+#         entities:
+#           - sensor.ezhi_spot_action
+#           - sensor.epex_spot_data_rank
+# ============================================================================

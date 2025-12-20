@@ -1,0 +1,32 @@
+# ============================================================================
+# EZHI Spot-Steuerung v1.1.0-beta - SQL Sensor für Verbrauchsprofil
+# ============================================================================
+# Diese Datei in configuration.yaml einbinden:
+# sensor: !include sensors/ezhi_sql_sensors.yaml
+#
+# WICHTIG: statistic_id muss zu deinem Sensor passen!
+# ============================================================================
+
+- platform: sql
+  db_url: sqlite:////config/home-assistant_v2.db
+  scan_interval: 3600  # 1x pro Stunde aktualisieren
+  queries:
+    # =================================================================
+    # VERBRAUCHSPROFIL: Durchschnitt pro Stunde (letzte 7 Tage)
+    # =================================================================
+    - name: "EZHI Verbrauchsprofil 7 Tage"
+      query: >
+        SELECT json_group_object(hour, ROUND(avg_wh, 0)) as hourly_json
+        FROM (
+          SELECT strftime('%H', start_ts, 'unixepoch', 'localtime') as hour,
+                 AVG(state) as avg_wh
+          FROM statistics
+          WHERE metadata_id = (
+            SELECT id FROM statistics_meta 
+            WHERE statistic_id = 'sensor.smart_meter_ac_meter_total_watt_hours_imported'
+          )
+          AND start_ts > strftime('%s', 'now', '-7 days')
+          GROUP BY hour
+          ORDER BY hour
+        )
+      column: "hourly_json"

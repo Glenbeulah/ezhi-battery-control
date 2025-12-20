@@ -1,0 +1,268 @@
+# ============================================================================
+# EZHI Spot-Steuerung v1.1.0-beta - Template Sensoren
+# ============================================================================
+# Diese Sensoren in configuration.yaml einbinden:
+# template: !include templates/ezhi_spot_sensors.yaml
+#
+# BENÖTIGT: sql_sensors.yaml für Verbrauchsprofil
+# ============================================================================
+
+- sensor:
+    # =================================================================
+    # VERBRAUCHSPROGNOSE aus SQL-Sensor
+    # =================================================================
+    - name: "EZHI Erwarteter Verbrauch Stunde"
+      unique_id: ezhi_expected_consumption_hour
+      unit_of_measurement: "Wh"
+      icon: mdi:home-lightning-bolt
+      state: >
+        {% set data = states('sensor.ezhi_verbrauchsprofil_7_tage') %}
+        {% if data not in ['unknown', 'unavailable', 'None', ''] %}
+          {% set json = data | from_json %}
+          {% set hour = now().strftime('%H') %}
+          {{ json.get(hour, 300) | int }}
+        {% else %}
+          300
+        {% endif %}
+      attributes:
+        naechste_stunde: >
+          {% set data = states('sensor.ezhi_verbrauchsprofil_7_tage') %}
+          {% if data not in ['unknown', 'unavailable', 'None', ''] %}
+            {% set json = data | from_json %}
+            {% set hour = '%02d' % ((now().hour + 1) % 24) %}
+            {{ json.get(hour, 300) | int }}
+          {% else %}
+            300
+          {% endif %}
+        naechste_4_stunden: >
+          {% set data = states('sensor.ezhi_verbrauchsprofil_7_tage') %}
+          {% if data not in ['unknown', 'unavailable', 'None', ''] %}
+            {% set json = data | from_json %}
+            {% set total = 0 %}
+            {% for i in range(1, 5) %}
+              {% set hour = '%02d' % ((now().hour + i) % 24) %}
+              {% set total = total + (json.get(hour, 300) | int) %}
+            {% endfor %}
+            {{ total }}
+          {% else %}
+            1200
+          {% endif %}
+        profil_json: "{{ states('sensor.ezhi_verbrauchsprofil_7_tage') }}"
+
+    # =================================================================
+    # ENERGIE-BILANZ: PV vs. Verbrauch für nächste Stunden
+    # =================================================================
+    - name: "EZHI Energie Bilanz 4h"
+      unique_id: ezhi_energy_balance_4h
+      unit_of_measurement: "Wh"
+      icon: mdi:scale-balance
+      state: >
+        {% set pv_rest = states('sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute') | float(0) * 1000 %}
+        {% set verbrauch_4h = state_attr('sensor.ezhi_erwarteter_verbrauch_stunde', 'naechste_4_stunden') | int(1200) %}
+        {{ (pv_rest - verbrauch_4h) | round(0) }}
+      attributes:
+        pv_erwartet_wh: "{{ (states('sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute') | float(0) * 1000) | round(0) }}"
+        verbrauch_erwartet_wh: "{{ state_attr('sensor.ezhi_erwarteter_verbrauch_stunde', 'naechste_4_stunden') | int(1200) }}"
+        bewertung: >
+          {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
+          {% if bilanz > 2000 %}
+            Überschuss
+          {% elif bilanz > 0 %}
+            Ausgeglichen
+          {% elif bilanz > -1000 %}
+            Leichtes Defizit
+          {% else %}
+            Defizit
+          {% endif %}
+
+    # =================================================================
+    # SPOT-BEWERTUNG: Kombiniert Preis + PV + Verbrauch
+    # =================================================================
+    - name: "EZHI Spot Empfehlung"
+      unique_id: ezhi_spot_recommendation
+      icon: >
+        {% set action = states('sensor.ezhi_spot_action') %}
+        {% if action == 'laden' %}
+          mdi:battery-charging
+        {% elif action == 'entladen' %}
+          mdi:battery-arrow-down
+        {% elif action == 'halten' %}
+          mdi:battery-lock
+        {% else %}
+          mdi:battery
+        {% endif %}
+      state: "{{ states('sensor.ezhi_spot_action') }}"
+      attributes:
+        spot_preis: "{{ states('sensor.epex_spot_data_market_price') | float(0) }}"
+        spot_rank: "{{ states('sensor.epex_spot_data_rank') | int(12) }}"
+        spot_quantile: "{{ states('sensor.epex_spot_data_quantile') | float(0.5) }}"
+        pv_rest_heute_kwh: "{{ states('sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute') | float(0) }}"
+        pv_morgen_kwh: "{{ states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) }}"
+        verbrauch_stunde_wh: "{{ states('sensor.ezhi_erwarteter_verbrauch_stunde') | int(300) }}"
+        verbrauch_4h_wh: "{{ state_attr('sensor.ezhi_erwarteter_verbrauch_stunde', 'naechste_4_stunden') | int(1200) }}"
+        energie_bilanz_wh: "{{ states('sensor.ezhi_energie_bilanz_4h') | int(0) }}"
+        grund: "{{ states('sensor.ezhi_spot_grund') }}"
+
+    # =================================================================
+    # SPOT-AKTION: Was soll die Batterie tun?
+    # =================================================================
+    - name: "EZHI Spot Action"
+      unique_id: ezhi_spot_action
+      state: >
+        {% set rank = states('sensor.epex_spot_data_rank') | int(12) %}
+        {% set quantile = states('sensor.epex_spot_data_quantile') | float(0.5) %}
+        {% set pv_rest = states('sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute') | float(0) %}
+        {% set pv_morgen = states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) %}
+        {% set hour = now().hour %}
+        {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
+        {% set verbrauch_4h = state_attr('sensor.ezhi_erwarteter_verbrauch_stunde', 'naechste_4_stunden') | int(1200) %}
+        
+        {# === BILLIGSTE STUNDEN (Rang 1-4 oder Quantil < 0.2) === #}
+        {% if rank <= 4 or quantile < 0.2 %}
+          {# Nicht laden wenn genug PV kommt UND Verbrauch gedeckt #}
+          {% if bilanz > 2000 and hour < 14 %}
+            normal
+          {% else %}
+            laden
+          {% endif %}
+        
+        {# === TEUERSTE STUNDEN (Rang 21-24 oder Quantil > 0.8) === #}
+        {% elif rank >= 21 or quantile > 0.8 %}
+          entladen
+        
+        {# === MITTLERER BEREICH === #}
+        {% else %}
+          {# Viel PV erwartet und Verbrauch gedeckt: Batterie schonen #}
+          {% if bilanz > 1000 and hour < 12 %}
+            halten
+          {# Abends mit guter Prognose morgen: Batterie schonen #}
+          {% elif hour >= 18 and pv_morgen > 5 %}
+            halten
+          {# Energie-Defizit erwartet: Normal regeln #}
+          {% elif bilanz < -500 %}
+            normal
+          {% else %}
+            normal
+          {% endif %}
+        {% endif %}
+
+    # =================================================================
+    # SPOT-GRUND: Warum diese Empfehlung?
+    # =================================================================
+    - name: "EZHI Spot Grund"
+      unique_id: ezhi_spot_grund
+      state: >
+        {% set rank = states('sensor.epex_spot_data_rank') | int(12) %}
+        {% set quantile = states('sensor.epex_spot_data_quantile') | float(0.5) %}
+        {% set pv_rest = states('sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute') | float(0) %}
+        {% set pv_morgen = states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) %}
+        {% set hour = now().hour %}
+        {% set preis = states('sensor.epex_spot_data_market_price') | float(0) %}
+        {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
+        {% set verbrauch_h = states('sensor.ezhi_erwarteter_verbrauch_stunde') | int(300) %}
+        
+        {% if rank <= 4 or quantile < 0.2 %}
+          {% if bilanz > 2000 and hour < 14 %}
+            Billig ({{ preis | round(1) }}ct), aber +{{ (bilanz/1000) | round(1) }}kWh Überschuss erwartet
+          {% else %}
+            Billigste Stunden (Rang {{ rank }}, {{ preis | round(1) }}ct) - Laden!
+          {% endif %}
+        {% elif rank >= 21 or quantile > 0.8 %}
+          Teuerste Stunden (Rang {{ rank }}, {{ preis | round(1) }}ct) - Entladen!
+        {% elif bilanz > 1000 and hour < 12 %}
+          Überschuss erwartet (+{{ (bilanz/1000) | round(1) }}kWh) - Batterie schonen
+        {% elif hour >= 18 and pv_morgen > 5 %}
+          Abend, morgen {{ pv_morgen | round(1) }}kWh PV - Batterie schonen
+        {% elif bilanz < -500 %}
+          Defizit erwartet ({{ (bilanz/1000) | round(1) }}kWh) - Normal regeln
+        {% else %}
+          Normale Stunde (Rang {{ rank }}, ~{{ verbrauch_h }}Wh Verbrauch)
+        {% endif %}
+
+    # =================================================================
+    # SPOT-SCORE: Numerischer Wert für Dashboard (-100 bis +100)
+    # =================================================================
+    - name: "EZHI Spot Score"
+      unique_id: ezhi_spot_score
+      unit_of_measurement: "%"
+      state: >
+        {% set action = states('sensor.ezhi_spot_action') %}
+        {% set quantile = states('sensor.epex_spot_data_quantile') | float(0.5) %}
+        {% if action == 'laden' %}
+          {{ ((1 - quantile) * 100) | round(0) }}
+        {% elif action == 'entladen' %}
+          {{ (quantile * -100) | round(0) }}
+        {% elif action == 'halten' %}
+          0
+        {% else %}
+          {{ ((0.5 - quantile) * 50) | round(0) }}
+        {% endif %}
+
+    # =================================================================
+    # DYNAMISCHES ENTLADE-LIMIT basierend auf Spot + Verbrauch
+    # =================================================================
+    - name: "EZHI Dynamisches Entlade-Limit"
+      unique_id: ezhi_dynamic_discharge_limit
+      unit_of_measurement: "%"
+      state: >
+        {% set basis = states('input_number.entlade_limit') | float(20) %}
+        {% set action = states('sensor.ezhi_spot_action') %}
+        {% set pv_morgen = states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) %}
+        {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
+        
+        {% if action == 'entladen' %}
+          {# Teuer: Tiefer entladen erlaubt #}
+          {% if pv_morgen > 5 %}
+            {# Morgen viel PV: Noch tiefer ok #}
+            {{ (basis - 10) | max(5) }}
+          {% elif bilanz > 0 %}
+            {# Heute noch Überschuss erwartet #}
+            {{ (basis - 7) | max(8) }}
+          {% else %}
+            {{ (basis - 5) | max(10) }}
+          {% endif %}
+        {% elif action == 'halten' %}
+          {# Halten: Höheres Limit #}
+          {{ (basis + 15) | min(50) }}
+        {% else %}
+          {{ basis }}
+        {% endif %}
+
+    # =================================================================
+    # MAX SOC FÜR NETZLADEN (abhängig von PV + Verbrauch)
+    # =================================================================
+    - name: "EZHI Spot Netzladen Max SOC"
+      unique_id: ezhi_spot_grid_charge_max_soc
+      unit_of_measurement: "%"
+      state: >
+        {% set pv_rest = states('sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute') | float(0) %}
+        {% set pv_morgen = states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) %}
+        {% set hour = now().hour %}
+        {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
+        {% set verbrauch_4h = state_attr('sensor.ezhi_erwarteter_verbrauch_stunde', 'naechste_4_stunden') | int(1200) %}
+        
+        {# Nachts (00-06): Mehr laden wenn morgen wenig PV oder hoher Verbrauch #}
+        {% if hour < 6 %}
+          {% if pv_morgen < 2 %}
+            80
+          {% elif pv_morgen < 5 and verbrauch_4h > 1500 %}
+            70
+          {% elif pv_morgen < 5 %}
+            60
+          {% else %}
+            40
+          {% endif %}
+        
+        {# Tagsüber: Weniger aus Netz, PV kommt #}
+        {% else %}
+          {% if bilanz < -1000 %}
+            {# Großes Defizit erwartet #}
+            60
+          {% elif bilanz < 0 %}
+            {# Leichtes Defizit #}
+            40
+          {% else %}
+            {# Überschuss erwartet #}
+            30
+          {% endif %}
+        {% endif %}
