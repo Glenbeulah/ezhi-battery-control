@@ -1,21 +1,16 @@
 # ============================================================================
 # EZHI Spot-Steuerung v1.1.0-beta - Template Sensoren
 # ============================================================================
-# Diese Sensoren in configuration.yaml einbinden:
+# Einbinden in configuration.yaml:
 #
-# template: !include templates/ezhi_spot_sensors.yaml
+#   template: !include ezhi_spot_templates.yaml
 #
-# ODER direkt in configuration.yaml unter "template:" einfügen.
-#
-# BENÖTIGT: sql_sensors.yaml für Verbrauchsprofil
+# BENÖTIGT: ezhi_spot_sql.yaml für Verbrauchsprofil
 # ============================================================================
 
 - sensor:
     # =================================================================
     # VERBRAUCHSPROGNOSE aus SQL-Sensor
-    # =================================================================
-    # WICHTIG: Liest aus dem ATTRIBUT "hourly_json", nicht aus dem State!
-    # (JSON ist zu lang für State, landet daher im Attribut)
     # =================================================================
     - name: "EZHI Erwarteter Verbrauch Stunde"
       unique_id: ezhi_expected_consumption_hour
@@ -24,9 +19,8 @@
       state: >
         {% set data = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
         {% if data %}
-          {% set json = data | from_json %}
           {% set hour = now().strftime('%H') %}
-          {{ json.get(hour, 300) | int }}
+          {{ data.get(hour, 300) | int }}
         {% else %}
           300
         {% endif %}
@@ -34,22 +28,20 @@
         naechste_stunde: >
           {% set data = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
           {% if data %}
-            {% set json = data | from_json %}
             {% set hour = '%02d' % ((now().hour + 1) % 24) %}
-            {{ json.get(hour, 300) | int }}
+            {{ data.get(hour, 300) | int }}
           {% else %}
             300
           {% endif %}
         naechste_4_stunden: >
           {% set data = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
           {% if data %}
-            {% set json = data | from_json %}
-            {% set total = 0 %}
+            {% set ns = namespace(total=0) %}
             {% for i in range(1, 5) %}
               {% set hour = '%02d' % ((now().hour + i) % 24) %}
-              {% set total = total + (json.get(hour, 300) | int) %}
+              {% set ns.total = ns.total + (data.get(hour, 300) | int) %}
             {% endfor %}
-            {{ total }}
+            {{ ns.total }}
           {% else %}
             1200
           {% endif %}
