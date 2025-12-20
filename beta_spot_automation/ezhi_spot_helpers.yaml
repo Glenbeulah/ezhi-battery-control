@@ -1,0 +1,18 @@
+# ============================================================================
+# EZHI Spot-Steuerung v1.1.0-beta - Helfer
+# ============================================================================
+# Einbinden in configuration.yaml:
+#
+# input_select: !include helpers/ezhi_spot_helpers.yaml
+#
+# ODER direkt in configuration.yaml unter input_select: einfügen
+# ============================================================================
+
+ezhi_modus:
+  name: EZHI Betriebsmodus
+  options:
+    - Normal
+    - Spot-Optimiert
+    - Manuell
+  initial: Normal
+  icon: mdi:auto-fix
