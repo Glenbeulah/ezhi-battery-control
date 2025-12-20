@@ -19,8 +19,9 @@
       state: >
         {% set data = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
         {% if data %}
+          {% set json = data | from_json %}
           {% set hour = now().strftime('%H') %}
-          {{ data.get(hour, 300) | int }}
+          {{ json.get(hour, 300) | int }}
         {% else %}
           300
         {% endif %}
@@ -28,18 +29,20 @@
         naechste_stunde: >
           {% set data = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
           {% if data %}
+            {% set json = data | from_json %}
             {% set hour = '%02d' % ((now().hour + 1) % 24) %}
-            {{ data.get(hour, 300) | int }}
+            {{ json.get(hour, 300) | int }}
           {% else %}
             300
           {% endif %}
         naechste_4_stunden: >
           {% set data = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
           {% if data %}
+            {% set json = data | from_json %}
             {% set ns = namespace(total=0) %}
             {% for i in range(1, 5) %}
               {% set hour = '%02d' % ((now().hour + i) % 24) %}
-              {% set ns.total = ns.total + (data.get(hour, 300) | int) %}
+              {% set ns.total = ns.total + (json.get(hour, 300) | int) %}
             {% endfor %}
             {{ ns.total }}
           {% else %}
