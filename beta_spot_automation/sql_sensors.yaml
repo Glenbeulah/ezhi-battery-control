@@ -1,32 +1,82 @@
 # ============================================================================
 # EZHI Spot-Steuerung v1.1.0-beta - SQL Sensor für Verbrauchsprofil
 # ============================================================================
-# Diese Datei in configuration.yaml einbinden:
-# sensor: !include sensors/ezhi_sql_sensors.yaml
+# WICHTIG: Neue SQL-Syntax seit HA 2023.x!
+# 
+# Direkt in configuration.yaml als eigener Block (NICHT unter sensor:):
 #
-# WICHTIG: statistic_id muss zu deinem Sensor passen!
+# sql:
+#   - name: "EZHI Verbrauchsprofil 7 Tage"
+#     ... (siehe unten)
+#
+# HINWEIS: statistic_id muss zu deinem Sensor passen!
 # ============================================================================
 
-- platform: sql
-  db_url: sqlite:////config/home-assistant_v2.db
-  scan_interval: 3600  # 1x pro Stunde aktualisieren
-  queries:
-    # =================================================================
-    # VERBRAUCHSPROFIL: Durchschnitt pro Stunde (letzte 7 Tage)
-    # =================================================================
-    - name: "EZHI Verbrauchsprofil 7 Tage"
-      query: >
-        SELECT json_group_object(hour, ROUND(avg_wh, 0)) as hourly_json
+sql:
+  - name: "EZHI Verbrauchsprofil 7 Tage"
+    db_url: sqlite:////config/home-assistant_v2.db
+    query: >
+      SELECT json_group_object(hour, ROUND(avg_diff, 0)) as hourly_json
+      FROM (
+        SELECT 
+          strftime('%H', start_ts, 'unixepoch', 'localtime') as hour,
+          AVG(state - prev_state) as avg_diff
         FROM (
-          SELECT strftime('%H', start_ts, 'unixepoch', 'localtime') as hour,
-                 AVG(state) as avg_wh
+          SELECT 
+            start_ts,
+            state,
+            LAG(state) OVER (ORDER BY start_ts) as prev_state
           FROM statistics
           WHERE metadata_id = (
             SELECT id FROM statistics_meta 
             WHERE statistic_id = 'sensor.smart_meter_ac_meter_total_watt_hours_imported'
           )
           AND start_ts > strftime('%s', 'now', '-7 days')
-          GROUP BY hour
-          ORDER BY hour
         )
-      column: "hourly_json"
+        WHERE prev_state IS NOT NULL 
+          AND (state - prev_state) >= 0 
+          AND (state - prev_state) < 5000
+        GROUP BY hour
+      )
+    column: "hourly_json"
+
+# ============================================================================
+# ERGEBNIS:
+# ============================================================================
+# Der Sensor liefert ein JSON-Objekt im Attribut "hourly_json":
+#
+# {"00":63,"01":58,"02":59,"07":179,"08":132,"17":259,...}
+#
+# Werte = Durchschnittlicher Verbrauch in Wh pro Stunde (letzte 7 Tage)
+#
+# HINWEIS: Das JSON ist zu lang für den State (max 255 Zeichen),
+# daher steht es nur im Attribut. Das ist korrekt so!
+# Der Template-Sensor in templates_spot.yaml liest das Attribut aus.
+# ============================================================================
+
+# ============================================================================
+# FALLS DEIN SENSOR EIN KUMULATIVER ZÄHLER IST:
+# ============================================================================
+# Die Query oben berechnet automatisch die Differenz (state - prev_state)
+# mit der LAG() Funktion. Das ist nötig für Sensoren die den Gesamtverbrauch
+# zählen (z.B. 2.341.207 Wh) statt den aktuellen Verbrauch.
+#
+# Filter gegen Ausreißer:
+# - (state - prev_state) >= 0  → Keine negativen Werte (Zähler-Resets)
+# - (state - prev_state) < 5000 → Max 5 kWh/Stunde (unrealistisch mehr)
+# ============================================================================
+
+# ============================================================================
+# DEBUG: Welche statistic_id hast du?
+# ============================================================================
+# Falls der Sensor "unknown" zeigt, stimmt evtl. die statistic_id nicht.
+# Füge temporär diesen Debug-Sensor hinzu:
+#
+# sql:
+#   - name: "Debug Statistics IDs"
+#     db_url: sqlite:////config/home-assistant_v2.db
+#     query: "SELECT statistic_id FROM statistics_meta WHERE statistic_id LIKE '%meter%' OR statistic_id LIKE '%energy%' LIMIT 20"
+#     column: "statistic_id"
+#
+# Dann in Entwicklerwerkzeuge → Zustände nachschauen welche IDs es gibt.
+# ============================================================================

@@ -2,7 +2,10 @@
 # EZHI Spot-Steuerung v1.1.0-beta - Template Sensoren
 # ============================================================================
 # Diese Sensoren in configuration.yaml einbinden:
+#
 # template: !include templates/ezhi_spot_sensors.yaml
+#
+# ODER direkt in configuration.yaml unter "template:" einfügen.
 #
 # BENÖTIGT: sql_sensors.yaml für Verbrauchsprofil
 # ============================================================================
@@ -11,13 +14,16 @@
     # =================================================================
     # VERBRAUCHSPROGNOSE aus SQL-Sensor
     # =================================================================
+    # WICHTIG: Liest aus dem ATTRIBUT "hourly_json", nicht aus dem State!
+    # (JSON ist zu lang für State, landet daher im Attribut)
+    # =================================================================
     - name: "EZHI Erwarteter Verbrauch Stunde"
       unique_id: ezhi_expected_consumption_hour
       unit_of_measurement: "Wh"
       icon: mdi:home-lightning-bolt
       state: >
-        {% set data = states('sensor.ezhi_verbrauchsprofil_7_tage') %}
-        {% if data not in ['unknown', 'unavailable', 'None', ''] %}
+        {% set data = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
+        {% if data %}
           {% set json = data | from_json %}
           {% set hour = now().strftime('%H') %}
           {{ json.get(hour, 300) | int }}
@@ -26,8 +32,8 @@
         {% endif %}
       attributes:
         naechste_stunde: >
-          {% set data = states('sensor.ezhi_verbrauchsprofil_7_tage') %}
-          {% if data not in ['unknown', 'unavailable', 'None', ''] %}
+          {% set data = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
+          {% if data %}
             {% set json = data | from_json %}
             {% set hour = '%02d' % ((now().hour + 1) % 24) %}
             {{ json.get(hour, 300) | int }}
@@ -35,8 +41,8 @@
             300
           {% endif %}
         naechste_4_stunden: >
-          {% set data = states('sensor.ezhi_verbrauchsprofil_7_tage') %}
-          {% if data not in ['unknown', 'unavailable', 'None', ''] %}
+          {% set data = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
+          {% if data %}
             {% set json = data | from_json %}
             {% set total = 0 %}
             {% for i in range(1, 5) %}
@@ -47,7 +53,7 @@
           {% else %}
             1200
           {% endif %}
-        profil_json: "{{ states('sensor.ezhi_verbrauchsprofil_7_tage') }}"
+        profil_json: "{{ state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') }}"
 
     # =================================================================
     # ENERGIE-BILANZ: PV vs. Verbrauch für nächste Stunden
