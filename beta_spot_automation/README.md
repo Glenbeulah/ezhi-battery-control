@@ -4,8 +4,33 @@
 
 Diese Version erweitert die Basisautomation um:
 - **Dynamische Stromtarife** (EPEX Spot)
-- **PV-Prognose** (Solcast)
+- **PV-Prognose** (Solcast - nächste 4 Stunden)
 - **Verbrauchsprognose** (letzte 7 Tage, stündlich)
+
+## Betriebsmodi
+
+Der Helfer `input_select.ezhi_modus` steuert das Verhalten der Automation:
+
+### 🔵 Normal
+Die Standard-Regelung aus v1.0.0:
+- Nulleinspeisung mit Peak-Detection
+- SOC-Schutz bei niedrigem Batteriestand
+- **Ignoriert Spot-Preise komplett**
+- Ideal für: Feste Stromtarife, Einspeisung unerwünscht
+
+### 🟢 Spot-Optimiert
+Volle Spot-Preis-Steuerung:
+- **Billige Stunden (Rang 1-4):** Batterie aus Netz laden
+- **Teure Stunden (Rang 21-24):** Batterie entladen, tieferes Limit
+- **Mittlere Preise:** Normal regeln oder halten (je nach PV-Prognose)
+- Berücksichtigt PV-Forecast und Verbrauchsprofil
+- Ideal für: Dynamische Tarife (Tibber, aWATTar, EPEX)
+
+### 🔴 Manuell
+Automation deaktiviert:
+- Keine automatischen Änderungen am Inverter
+- Volle manuelle Kontrolle
+- Ideal für: Wartung, Tests, Urlaub
 
 ## Dateien
 
@@ -34,17 +59,18 @@ Diese Version erweitert die Basisautomation um:
 │  (ezhi_spot_templates.yaml)                                    │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  Verbrauchsprofil ─── Erwarteter Verbrauch (Wh) ───┐           │
-│                                                     │           │
-│  EPEX Spot ──┬── Rang (1-24)                       │           │
-│              └── Quantil (0-1)     ────────────────┼──► EZHI   │
-│                                                     │    Spot   │
-│  Solcast ───┬── PV Rest heute                      │    Action │
-│             └── PV morgen          ────────────────┘           │
-│                                                                 │
-│                    ↓                                            │
-│              Energie-Bilanz 4h                                  │
-│              (PV - Verbrauch)                                   │
+│  Verbrauch 4h ────────────────────────────────┐                │
+│  (aus SQL-Profil)                              │                │
+│                                                │                │
+│  EPEX Spot ──┬── Rang (1-24)                  │                │
+│              └── Quantil (0-1)    ────────────┼──► EZHI        │
+│                                                │    Spot        │
+│  Solcast ────── PV nächste 4h ────────────────┤    Action      │
+│                 (aus detailedHourly)           │                │
+│                                                │                │
+│                    ↓                           │                │
+│              Energie-Bilanz 4h ────────────────┘                │
+│              (PV 4h - Verbrauch 4h)                             │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -54,8 +80,13 @@ Diese Version erweitert die Basisautomation um:
 │  (ezhi_spot_automation.yaml)                                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  Liest sensor.ezhi_spot_action und entscheidet:                │
+│  Prüft input_select.ezhi_modus:                                │
 │                                                                 │
+│  - "Normal"         → Standard-Regelung (v1.0.0)               │
+│  - "Spot-Optimiert" → Spot-Preis-Steuerung                     │
+│  - "Manuell"        → Keine Aktion                             │
+│                                                                 │
+│  Bei Spot-Optimiert liest sensor.ezhi_spot_action:             │
 │  - "laden"    → Netzladen mit max. Leistung                    │
 │  - "entladen" → Tieferes Entlade-Limit                         │
 │  - "halten"   → Batterie schonen                               │
@@ -70,16 +101,11 @@ Diese Version erweitert die Basisautomation um:
 
 ⚠️ **Wichtig:** Die SQL-Integration verwendet seit HA 2023.x eine neue Syntax!
 
-**Option A: Include (empfohlen)**
 ```yaml
 # configuration.yaml
 sql: !include ezhi_spot_sql.yaml
 ```
 Kopiere `ezhi_spot_sql.yaml` nach `/config/`
-
-**Option B: Direkt einfügen**
-
-Füge den Inhalt von `ezhi_spot_sql.yaml` direkt in `configuration.yaml` ein.
 
 **Anpassen:** Ersetze die `statistic_id` mit deinem Energie-Sensor!
 
@@ -112,21 +138,23 @@ Einstellungen → Automatisierungen → ⋮ → Aus YAML importieren
 2. Dashboard öffnen → Bearbeiten → Raw-Konfigurationseditor
 3. Inhalt von `ezhi_spot_dashboard.yaml` einfügen
 
+**Empfohlene HACS-Cards:**
+- `apexcharts-card` - Für Verbrauchsprofil-Grafik
+- `mushroom-cards` - Für schönere Status-Karten
+
 ### 6. Home Assistant neustarten
 
 Nach dem Neustart sollten die Sensoren erscheinen.
 
-## Entscheidungslogik
+## Entscheidungslogik (Spot-Optimiert)
 
 ### Inputs
 
 | Quelle | Sensor | Beschreibung |
 |--------|--------|--------------|
-| EPEX Spot | `sensor.epex_spot_data_market_price` | Aktueller Preis in ct/kWh |
 | EPEX Spot | `sensor.epex_spot_data_rank` | Rang 1-24 (1=billigste Stunde) |
 | EPEX Spot | `sensor.epex_spot_data_quantile` | 0-1 (0=billigste) |
-| Solcast | `sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute` | Erwartete PV in kWh |
-| Solcast | `sensor.solcast_pv_forecast_prognose_morgen` | PV morgen in kWh |
+| Solcast | `sensor.solcast_pv_forecast_prognose_heute` | detailedHourly Attribut |
 | SQL | `sensor.ezhi_verbrauchsprofil_7_tage` | Durchschnitt pro Stunde |
 
 ### Berechnete Sensoren
@@ -134,7 +162,8 @@ Nach dem Neustart sollten die Sensoren erscheinen.
 | Sensor | Beschreibung |
 |--------|--------------|
 | `sensor.ezhi_erwarteter_verbrauch_stunde` | Verbrauch jetzt (Wh) |
-| `sensor.ezhi_energie_bilanz_4h` | PV minus Verbrauch nächste 4h (Wh) |
+| `sensor.ezhi_pv_prognose_4h` | PV nächste 4 Stunden (Wh) |
+| `sensor.ezhi_energie_bilanz_4h` | PV 4h minus Verbrauch 4h (Wh) |
 | `sensor.ezhi_spot_action` | Empfehlung: laden/entladen/halten/normal |
 | `sensor.ezhi_spot_grund` | Begründung als Text |
 | `sensor.ezhi_spot_score` | -100 bis +100 |
@@ -144,18 +173,18 @@ Nach dem Neustart sollten die Sensoren erscheinen.
 ### Entscheidungsbaum
 
 ```
-PREIS BILLIG (Rang ≤4)?
-├── JA: Energie-Bilanz > +2kWh UND vor 14 Uhr?
-│       ├── JA: → NORMAL (genug PV kommt)
+PREIS BILLIG (Rang ≤4 oder Quantil <0.2)?
+├── JA: Bilanz 4h > +2000 Wh?
+│       ├── JA: → NORMAL (genug PV in nächsten 4h)
 │       └── NEIN: → LADEN (aus Netz!)
 │
-PREIS TEUER (Rang ≥21)?
+PREIS TEUER (Rang ≥21 oder Quantil >0.8)?
 ├── JA: → ENTLADEN (Batterie nutzen)
 │
 SONST (mittlerer Preis):
-├── Bilanz > +1kWh UND vor 12 Uhr? → HALTEN (PV kommt)
+├── Bilanz 4h > +1000 Wh? → HALTEN (PV kommt bald)
 ├── Nach 18 Uhr UND morgen >5kWh PV? → HALTEN (morgen laden)
-├── Bilanz < -500Wh? → NORMAL (Defizit decken)
+├── Bilanz 4h < -500 Wh? → NORMAL (Defizit decken)
 └── Sonst → NORMAL
 ```
 
@@ -165,10 +194,7 @@ SONST (mittlerer Preis):
 
 Das JSON ist zu lang für den State (max 255 Zeichen). **Das ist korrekt!** 
 
-Die Daten liegen im **Attribut** `hourly_json`. Die Template-Sensoren lesen von dort:
-```jinja2
-{% set data = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
-```
+Die Daten liegen im **Attribut** `hourly_json`. Die Template-Sensoren lesen von dort.
 
 ### Debug: Welche statistic_id hast du?
 
@@ -182,12 +208,6 @@ sql:
     column: "statistic_id"
 ```
 
-### LAG() für kumulative Zähler
-
-Die Query berechnet automatisch die Differenz pro Stunde. Filter gegen Ausreißer:
-- `(state - prev_state) >= 0` → Keine negativen Werte
-- `(state - prev_state) < 5000` → Max 5 kWh/Stunde
-
 ## Voraussetzungen
 
 | Integration | Link | Hinweis |
@@ -199,20 +219,35 @@ Die Query berechnet automatisch die Differenz pro Stunde. Filter gegen Ausreiße
 
 ### Winter-Nacht (02:00)
 ```
-Rang: 2 (billig), PV morgen: 1.5 kWh, Bilanz: -600 Wh
-→ LADEN, Max SOC: 80%
+Modus: Spot-Optimiert
+Rang: 2 (billig), PV 4h: 0 Wh, Verbrauch 4h: 250 Wh
+Bilanz: -250 Wh
+
+→ Action: LADEN
+→ Max SOC: 80% (wenig PV morgen)
+→ Grund: "Billigste Stunden (Rang 2, 2.3ct) - Laden!"
 ```
 
-### Sommer-Vormittag (10:00)
+### Sommer-Vormittag (08:00)
 ```
-Rang: 8 (mittel), PV Rest: 12 kWh, Bilanz: +10000 Wh
-→ HALTEN, Entlade-Limit: 35%
+Modus: Spot-Optimiert
+Rang: 8 (mittel), PV 4h: 3800 Wh, Verbrauch 4h: 350 Wh
+Bilanz: +3450 Wh
+
+→ Action: HALTEN
+→ Entlade-Limit: 35%
+→ Grund: "PV-Überschuss in 4h (+3.5kWh) - Batterie schonen"
 ```
 
 ### Abend-Peak (18:30)
 ```
-Rang: 23 (teuer!), PV morgen: 8 kWh, Bilanz: -3300 Wh
-→ ENTLADEN, Entlade-Limit: 10%
+Modus: Spot-Optimiert
+Rang: 23 (teuer!), PV 4h: 0 Wh, Verbrauch 4h: 300 Wh
+Bilanz: -300 Wh
+
+→ Action: ENTLADEN
+→ Entlade-Limit: 10%
+→ Grund: "Teuerste Stunden (Rang 23, 38ct) - Entladen!"
 ```
 
 ## Troubleshooting
@@ -223,13 +258,14 @@ Rang: 23 (teuer!), PV morgen: 8 kWh, Bilanz: -3300 Wh
 | State leer, Attribut hat Daten | **Korrekt!** Template liest aus Attribut |
 | Template zeigt 0 | SQL Sensor prüfen |
 | EPEX Sensoren fehlen | HACS Integration installieren |
+| ApexCharts zeigt "Loading" | Browser-Cache leeren, HACS-Card neu installieren |
 
 ## Nächste Schritte / TODO
 
 - [ ] Wochenende vs. Wochentag unterscheiden
 - [ ] Tibber/aWATTar als Alternative
 - [ ] Minimale Lade-/Entlade-Dauer (Hysterese)
-- [ ] ApexCharts für Tagesverlauf
+- [ ] Notification bei Spot-Aktionen
 
 ## Feedback
 

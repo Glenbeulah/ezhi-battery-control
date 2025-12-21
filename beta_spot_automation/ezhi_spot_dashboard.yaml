@@ -6,9 +6,9 @@
 # 2. Dashboard öffnen → Bearbeiten → Raw-Konfigurationseditor
 # 3. Diesen Inhalt einfügen
 #
-# Benötigt: 
-# - card-mod (HACS) für Farben - optional
-# - apexcharts-card (HACS) für Grafiken - optional
+# Benötigt (optional, aber empfohlen):
+# - apexcharts-card (HACS) für Verbrauchsprofil-Grafik
+# - mushroom-cards (HACS) für schönere Status-Karten
 # ============================================================================
 
 title: EZHI Spot-Steuerung
@@ -25,9 +25,11 @@ views:
           # 🔋 EZHI Spot-Steuerung
           **Beta v1.1.0** - Dynamische Batterie-Optimierung
 
+      # ================================================================
+      # STATUS + MODUS (mit Mushroom Cards)
+      # ================================================================
       - type: horizontal-stack
         cards:
-          # Status-Karte groß
           - type: custom:mushroom-template-card
             primary: "{{ states('sensor.ezhi_spot_action') | upper }}"
             secondary: "{{ states('sensor.ezhi_spot_grund') }}"
@@ -47,41 +49,25 @@ views:
             tap_action:
               action: more-info
               entity: sensor.ezhi_spot_empfehlung
-            card_mod:
-              style: |
-                ha-card {
-                  --primary-text-color: {% set action = states('sensor.ezhi_spot_action') %}
-                    {% if action == 'laden' %}var(--success-color)
-                    {% elif action == 'entladen' %}var(--error-color)
-                    {% elif action == 'halten' %}var(--warning-color)
-                    {% else %}var(--info-color){% endif %};
-                }
 
-          # Modus-Auswahl
           - type: custom:mushroom-select-card
             entity: input_select.ezhi_modus
             name: Betriebsmodus
             icon: mdi:auto-fix
 
       # ================================================================
-      # FALLBACK ohne Mushroom Cards
+      # STATUS (Fallback ohne Mushroom Cards)
       # ================================================================
-      - type: conditional
-        conditions:
-          - condition: state
-            entity: sensor.ezhi_spot_action
-            state_not: "unavailable"
-        card:
-          type: entities
-          title: Status (Fallback)
-          show_header_toggle: false
-          entities:
-            - entity: sensor.ezhi_spot_action
-              name: Empfehlung
-            - entity: sensor.ezhi_spot_grund
-              name: Begründung
-            - entity: input_select.ezhi_modus
-              name: Modus
+      - type: entities
+        title: Status
+        show_header_toggle: false
+        entities:
+          - entity: input_select.ezhi_modus
+            name: Betriebsmodus
+          - entity: sensor.ezhi_spot_action
+            name: Empfehlung
+          - entity: sensor.ezhi_spot_grund
+            name: Begründung
 
       # ================================================================
       # SPOT-PREISE
@@ -109,7 +95,6 @@ views:
                 name: Quantil
                 icon: mdi:percent
 
-          # Preis-Gauge
           - type: gauge
             entity: sensor.epex_spot_data_market_price
             name: Strompreis
@@ -123,12 +108,12 @@ views:
             needle: true
 
       # ================================================================
-      # ENERGIE-BILANZ
+      # ENERGIE-BILANZ (nächste 4 Stunden)
       # ================================================================
       - type: vertical-stack
         cards:
           - type: markdown
-            content: "## ⚡ Energie-Bilanz"
+            content: "## ⚡ Energie-Bilanz (nächste 4h)"
 
           - type: horizontal-stack
             cards:
@@ -143,9 +128,8 @@ views:
                 icon: mdi:scale-balance
 
               - type: entity
-                entity: sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute
-                name: PV Rest
-                unit: kWh
+                entity: sensor.ezhi_pv_prognose_4h
+                name: PV 4h
                 icon: mdi:solar-power
 
           - type: entities
@@ -154,11 +138,6 @@ views:
                 entity: sensor.ezhi_erwarteter_verbrauch_stunde
                 attribute: naechste_stunde
                 name: Verbrauch nächste Stunde
-                suffix: " Wh"
-              - type: attribute
-                entity: sensor.ezhi_erwarteter_verbrauch_stunde
-                attribute: naechste_4_stunden
-                name: Verbrauch nächste 4h
                 suffix: " Wh"
               - type: attribute
                 entity: sensor.ezhi_energie_bilanz_4h
@@ -202,7 +181,7 @@ views:
                 name: Max SOC Netzladen
 
       # ================================================================
-      # SPOT SCORE
+      # SPOT SCORE GAUGE
       # ================================================================
       - type: gauge
         entity: sensor.ezhi_spot_score
@@ -216,17 +195,12 @@ views:
         needle: true
 
       # ================================================================
-      # VERBRAUCHSPROFIL (falls ApexCharts installiert)
+      # VERBRAUCHSPROFIL (ApexCharts)
       # ================================================================
-      - type: markdown
-        content: |
-          ## 📊 Verbrauchsprofil
-          *Durchschnitt der letzten 7 Tage pro Stunde*
-
       - type: custom:apexcharts-card
         header:
           show: true
-          title: Verbrauch nach Tageszeit
+          title: Verbrauchsprofil (Ø 7 Tage)
           show_states: false
         graph_span: 24h
         span:
@@ -236,33 +210,28 @@ views:
             height: 200px
           xaxis:
             labels:
-              format: HH:mm
+              format: HH
         series:
-          - entity: sensor.ezhi_erwarteter_verbrauch_stunde
+          - entity: sensor.ezhi_verbrauchsprofil_7_tage
             name: Verbrauch
             type: column
-            color: "#039be5"
+            color: "#4db6ac"
             data_generator: |
-              const data = entity.attributes.profil_json;
-              if (!data || data === 'unknown') return [];
-              try {
-                const json = JSON.parse(data);
-                const result = [];
-                const now = new Date();
-                const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-                for (let h = 0; h < 24; h++) {
-                  const hour = h.toString().padStart(2, '0');
-                  const value = json[hour] || 0;
-                  const time = new Date(startOfDay.getTime() + h * 3600000);
-                  result.push([time.getTime(), value]);
-                }
-                return result;
-              } catch (e) {
-                return [];
+              const data = entity.attributes.hourly_json;
+              if (!data) return [];
+              const now = new Date();
+              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+              let json = data;
+              if (typeof data === 'string') {
+                try { json = JSON.parse(data); } catch(e) { return []; }
               }
+              return Object.entries(json).map(([hour, value]) => {
+                const time = new Date(today.getTime() + parseInt(hour) * 3600000);
+                return [time.getTime(), value];
+              }).sort((a, b) => a[0] - b[0]);
 
       # ================================================================
-      # HISTORY GRAPH (Standard HA)
+      # HISTORY GRAPH
       # ================================================================
       - type: history-graph
         title: Verlauf (24h)
@@ -276,7 +245,7 @@ views:
             name: SOC
 
       # ================================================================
-      # ALLE SENSOREN (Debug)
+      # DEBUG / ALLE SENSOREN
       # ================================================================
       - type: entities
         title: 🔧 Debug / Alle Sensoren
@@ -293,9 +262,10 @@ views:
           - entity: sensor.ezhi_dynamisches_entlade_limit
           - entity: sensor.ezhi_spot_netzladen_max_soc
           - type: section
-            label: Verbrauch
+            label: Verbrauch & PV
           - entity: sensor.ezhi_verbrauchsprofil_7_tage
           - entity: sensor.ezhi_erwarteter_verbrauch_stunde
+          - entity: sensor.ezhi_pv_prognose_4h
           - entity: sensor.ezhi_energie_bilanz_4h
           - type: section
             label: Externe Daten
@@ -304,43 +274,3 @@ views:
           - entity: sensor.epex_spot_data_quantile
           - entity: sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute
           - entity: sensor.solcast_pv_forecast_prognose_morgen
-
-# ============================================================================
-# ALTERNATIVE: Einfaches Dashboard ohne HACS Cards
-# ============================================================================
-# Falls du keine HACS-Cards hast, kannst du auch nur diesen Teil verwenden:
-#
-# views:
-#   - title: EZHI Spot
-#     cards:
-#       - type: entities
-#         title: Spot-Steuerung
-#         entities:
-#           - entity: input_select.ezhi_modus
-#           - entity: sensor.ezhi_spot_action
-#           - entity: sensor.ezhi_spot_grund
-#           - type: divider
-#           - entity: sensor.epex_spot_data_market_price
-#           - entity: sensor.epex_spot_data_rank
-#           - type: divider
-#           - entity: sensor.ezhi_erwarteter_verbrauch_stunde
-#           - entity: sensor.ezhi_energie_bilanz_4h
-#           - type: divider
-#           - entity: sensor.ezhi_dynamisches_entlade_limit
-#           - entity: sensor.ezhi_spot_netzladen_max_soc
-#
-#       - type: gauge
-#         entity: sensor.epex_spot_data_market_price
-#         min: -5
-#         max: 50
-#         severity:
-#           green: -5
-#           yellow: 15
-#           red: 30
-#
-#       - type: history-graph
-#         hours_to_show: 24
-#         entities:
-#           - sensor.ezhi_spot_action
-#           - sensor.epex_spot_data_rank
-# ============================================================================
