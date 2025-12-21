@@ -5,9 +5,7 @@
 #
 #   sql: !include ezhi_spot_sql.yaml
 #
-# ODER den Inhalt direkt unter sql: einfügen.
-#
-# WICHTIG: statistic_id muss zu deinem Sensor passen!
+# WICHTIG: statistic_id anpassen! Siehe Optionen unten.
 # ============================================================================
 
 - name: "EZHI Verbrauchsprofil 7 Tage"
@@ -26,7 +24,7 @@
         FROM statistics
         WHERE metadata_id = (
           SELECT id FROM statistics_meta 
-          WHERE statistic_id = 'sensor.smart_meter_ac_meter_total_watt_hours_imported'
+          WHERE statistic_id = 'sensor.hausverbrauch_total'
         )
         AND start_ts > strftime('%s', 'now', '-7 days')
       )
@@ -38,7 +36,36 @@
   column: "hourly_json"
 
 # ============================================================================
-# ERGEBNIS:
+# WELCHEN SENSOR VERWENDEN?
+# ============================================================================
+#
+# OPTION A: Echter Hausverbrauch (EMPFOHLEN)
+# ------------------------------------------
+# Verwende sensor.hausverbrauch_total aus ezhi_hausverbrauch_template.yaml
+# 
+# Vorteile:
+#   - Zeigt echten Verbrauch inkl. PV-Eigenverbrauch
+#   - Profil ist unabhängig von Sonnenschein
+#   - Genauere Prognosen
+#
+# statistic_id = 'sensor.hausverbrauch_total'
+#
+#
+# OPTION B: Nur Netzbezug (EINFACHER)
+# -----------------------------------
+# Verwende direkt deinen Smart Meter Import-Sensor
+#
+# Nachteile:
+#   - Zeigt nur Netzbezug, nicht echten Verbrauch
+#   - Tagsüber zu niedrige Werte (PV-Eigenverbrauch fehlt)
+#   - Sommer vs. Winter unterschiedlich
+#
+# statistic_id = 'sensor.DEIN_SMARTMETER_IMPORT_WH'
+#
+# ============================================================================
+
+# ============================================================================
+# ERGEBNIS
 # ============================================================================
 # Der Sensor liefert ein JSON-Objekt im Attribut "hourly_json":
 #

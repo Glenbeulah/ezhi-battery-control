@@ -1,0 +1,91 @@
+# ============================================================================
+# EZHI Spot-Steuerung - Hausverbrauch Total (ÖFFENTLICHE VERSION)
+# ============================================================================
+# Dieser Sensor berechnet den echten Hausverbrauch aus kumulativen Wh-Zählern.
+# Keine Riemann-Summe - robust gegen Sensorausfälle!
+#
+# ANPASSEN: Ersetze die Sensor-Namen mit deinen eigenen!
+#
+# Formel: Hausverbrauch = Netzbezug + PV + Batterie_Out - Einspeisung - Batterie_In
+# ============================================================================
+
+- sensor:
+    - name: "Hausverbrauch Total"
+      unique_id: hausverbrauch_total_wh
+      unit_of_measurement: "Wh"
+      device_class: energy
+      state_class: total_increasing
+      icon: mdi:home-lightning-bolt
+      state: >
+        {# ============================================================ #}
+        {# ANPASSEN: Trage hier deine Sensor-Namen ein!                 #}
+        {# Alle Sensoren müssen kumulative Wh-Werte liefern.            #}
+        {# ============================================================ #}
+        
+        {# Netzbezug (Import vom Stromnetz) #}
+        {% set netzbezug = states('sensor.DEIN_SMARTMETER_IMPORT_WH') | float(0) %}
+        
+        {# Netzeinspeisung (Export ins Stromnetz) #}
+        {% set einspeisung = states('sensor.DEIN_SMARTMETER_EXPORT_WH') | float(0) %}
+        
+        {# PV-Erzeugung (Summe aller Wechselrichter) #}
+        {# Passe die Anzahl der PV-Sensoren an deine Anlage an #}
+        {% set pv_total = states('sensor.DEIN_PV_LIFETIME_ENERGY_WH') | float(0) %}
+        
+        {# Batterie-Entladung (optional, 0 wenn keine Batterie) #}
+        {% set batterie_out = states('sensor.DEIN_BATTERIE_DISCHARGE_WH') | float(0) %}
+        
+        {# Batterie-Ladung (optional, 0 wenn keine Batterie) #}
+        {% set batterie_in = states('sensor.DEIN_BATTERIE_CHARGE_WH') | float(0) %}
+        
+        {# Berechnung: Alles was reinkommt minus alles was rausgeht #}
+        {{ (netzbezug + pv_total + batterie_out - einspeisung - batterie_in) | round(1) }}
+
+# ============================================================================
+# BEISPIEL MIT MEHREREN PV-WECHSELRICHTERN
+# ============================================================================
+# Falls du mehrere PV-Sensoren hast, addiere sie so:
+#
+#        {% set pv_1 = states('sensor.wechselrichter_1_lifetime_energy') | float(0) %}
+#        {% set pv_2 = states('sensor.wechselrichter_2_lifetime_energy') | float(0) %}
+#        {% set pv_3 = states('sensor.balkonkraftwerk_lifetime_energy') | float(0) %}
+#        {% set pv_total = pv_1 + pv_2 + pv_3 %}
+#
+# ============================================================================
+
+# ============================================================================
+# OHNE BATTERIE
+# ============================================================================
+# Wenn du keine Batterie hast, vereinfacht sich die Formel zu:
+#
+#        {% set netzbezug = states('sensor.smartmeter_import_wh') | float(0) %}
+#        {% set einspeisung = states('sensor.smartmeter_export_wh') | float(0) %}
+#        {% set pv_total = states('sensor.pv_lifetime_energy_wh') | float(0) %}
+#        {{ (netzbezug + pv_total - einspeisung) | round(1) }}
+#
+# ============================================================================
+
+# ============================================================================
+# TYPISCHE SENSOR-NAMEN JE NACH INTEGRATION
+# ============================================================================
+# 
+# Fronius:
+#   - sensor.fronius_meter_energy_real_consumed (Import)
+#   - sensor.fronius_meter_energy_real_produced (Export)
+#   - sensor.fronius_inverter_energy_total (PV)
+#
+# SMA:
+#   - sensor.sma_energy_imported (Import)
+#   - sensor.sma_energy_exported (Export)
+#   - sensor.sma_total_yield (PV)
+#
+# Shelly 3EM:
+#   - sensor.shelly_3em_channel_a_energy (Import, pro Phase)
+#   - sensor.shelly_3em_channel_a_returned_energy (Export)
+#
+# APsystems EZ1:
+#   - sensor.ez1_gesamterzeugung_uber_lebensdauer (PV)
+#   - sensor.ezhi_battery_total_discharge_energy (Batterie out)
+#   - sensor.ezhi_battery_total_charge_energy (Batterie in)
+#
+# ============================================================================

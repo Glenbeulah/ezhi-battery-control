@@ -36,6 +36,7 @@ Automation deaktiviert:
 
 | Datei | Typ | Einbinden unter |
 |-------|-----|-----------------|
+| `ezhi_hausverbrauch_template.yaml` | Template Sensor | `template:` (optional) |
 | `ezhi_spot_sql.yaml` | SQL Sensor | `sql:` |
 | `ezhi_spot_templates.yaml` | Template Sensoren | `template:` |
 | `ezhi_spot_helpers.yaml` | Helfer (input_select) | `input_select:` |
@@ -45,6 +46,15 @@ Automation deaktiviert:
 ## Architektur
 
 ```
+┌─────────────────────────────────────────────────────────────────┐
+│               HAUSVERBRAUCH TOTAL (optional)                    │
+│  (ezhi_hausverbrauch_template.yaml)                            │
+├─────────────────────────────────────────────────────────────────┤
+│  Berechnet echten Verbrauch aus kumulativen Wh-Zählern:        │
+│  Netzbezug + PV + Batterie_Out - Einspeisung - Batterie_In     │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    SQL SENSOR                                   │
 │  (ezhi_spot_sql.yaml)                                          │
@@ -97,17 +107,35 @@ Automation deaktiviert:
 
 ## Installation
 
-### 1. SQL Sensor
+### 0. Hausverbrauch-Sensor (empfohlen)
 
-⚠️ **Wichtig:** Die SQL-Integration verwendet seit HA 2023.x eine neue Syntax!
+Für ein genaues Verbrauchsprofil solltest du den **echten Hausverbrauch** messen, nicht nur den Netzbezug. Der Netzbezug zeigt tagsüber zu niedrige Werte, weil PV-Eigenverbrauch fehlt.
+
+**Option A: Eigenen Sensor erstellen (empfohlen)**
+
+Kopiere `ezhi_hausverbrauch_template.yaml` nach `/config/` und passe die Sensor-Namen an:
+
+```yaml
+# configuration.yaml
+template: !include ezhi_hausverbrauch_template.yaml
+```
+
+Die Datei enthält Beispiele für verschiedene Wechselrichter (Fronius, SMA, Shelly, APsystems).
+
+**Option B: Nur Netzbezug (einfacher, aber ungenauer)**
+
+Verwende direkt deinen Smart Meter Import-Sensor in `ezhi_spot_sql.yaml`.
+
+### 1. SQL Sensor
 
 ```yaml
 # configuration.yaml
 sql: !include ezhi_spot_sql.yaml
 ```
-Kopiere `ezhi_spot_sql.yaml` nach `/config/`
 
-**Anpassen:** Ersetze die `statistic_id` mit deinem Energie-Sensor!
+**Wichtig:** Passe die `statistic_id` an:
+- Mit Hausverbrauch-Sensor: `sensor.hausverbrauch_total`
+- Ohne: `sensor.DEIN_SMARTMETER_IMPORT_WH`
 
 ### 2. Template Sensoren
 
@@ -115,7 +143,6 @@ Kopiere `ezhi_spot_sql.yaml` nach `/config/`
 # configuration.yaml
 template: !include ezhi_spot_templates.yaml
 ```
-Kopiere `ezhi_spot_templates.yaml` nach `/config/`
 
 ### 3. Helfer
 
@@ -123,14 +150,12 @@ Kopiere `ezhi_spot_templates.yaml` nach `/config/`
 # configuration.yaml
 input_select: !include ezhi_spot_helpers.yaml
 ```
-Kopiere `ezhi_spot_helpers.yaml` nach `/config/`
 
 **Oder über UI:** Einstellungen → Geräte & Dienste → Helfer → Helfer erstellen → Dropdown
 
 ### 4. Automation importieren
 
-Die Datei `ezhi_spot_automation.yaml` in Home Assistant importieren:
-Einstellungen → Automatisierungen → ⋮ → Aus YAML importieren
+Einstellungen → Automatisierungen → ⋮ → Aus YAML importieren → `ezhi_spot_automation.yaml`
 
 ### 5. Dashboard (optional)
 
@@ -145,6 +170,33 @@ Einstellungen → Automatisierungen → ⋮ → Aus YAML importieren
 ### 6. Home Assistant neustarten
 
 Nach dem Neustart sollten die Sensoren erscheinen.
+
+## Verbrauchsprofil erklärt
+
+### Was wird gemessen?
+
+Das SQL-Query analysiert die letzten 7 Tage und berechnet den **durchschnittlichen Verbrauch pro Stunde**.
+
+### Warum Hausverbrauch statt Netzbezug?
+
+```
+Beispiel um 12:00 im Sommer:
+┌─────────────────────────────────────────┐
+│ Echter Verbrauch:     400 Wh           │
+│ PV-Eigenverbrauch:    350 Wh           │
+│ Netzbezug (gemessen):  50 Wh  ← FALSCH │
+└─────────────────────────────────────────┘
+```
+
+Der Netzbezug zeigt nur 50 Wh, obwohl 400 Wh verbraucht werden. Das führt zu falschen Prognosen!
+
+### Formel für Hausverbrauch
+
+```
+Hausverbrauch = Netzbezug + PV + Batterie_Entladung - Einspeisung - Batterie_Ladung
+```
+
+Diese Formel nutzt **nur kumulative Wh-Zähler** - keine Riemann-Summe, robust gegen Sensorausfälle.
 
 ## Entscheidungslogik (Spot-Optimiert)
 
@@ -204,7 +256,7 @@ Falls `unknown`, prüfe verfügbare IDs:
 sql:
   - name: "Debug Statistics IDs"
     db_url: sqlite:////config/home-assistant_v2.db
-    query: "SELECT statistic_id FROM statistics_meta WHERE statistic_id LIKE '%meter%' OR statistic_id LIKE '%energy%' LIMIT 20"
+    query: "SELECT statistic_id FROM statistics_meta WHERE statistic_id LIKE '%meter%' OR statistic_id LIKE '%energy%' OR statistic_id LIKE '%verbrauch%' LIMIT 20"
     column: "statistic_id"
 ```
 
@@ -259,6 +311,7 @@ Bilanz: -300 Wh
 | Template zeigt 0 | SQL Sensor prüfen |
 | EPEX Sensoren fehlen | HACS Integration installieren |
 | ApexCharts zeigt "Loading" | Browser-Cache leeren, HACS-Card neu installieren |
+| Verbrauch tagsüber zu niedrig | Hausverbrauch-Sensor verwenden (PV-Eigenverbrauch fehlt) |
 
 ## Nächste Schritte / TODO
 
