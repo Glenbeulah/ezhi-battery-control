@@ -5,10 +5,41 @@
 #
 #   template: !include ezhi_spot_templates.yaml
 #
-# BENÖTIGT: ezhi_spot_sql.yaml für Verbrauchsprofil
+# BENÖTIGT:
+# - ezhi_spot_sql.yaml für Verbrauchsprofil
+# - EPEX Spot Integration (HACS)
+# - Solcast Integration (HACS)
+#
+# OPTIONAL:
+# - Hausverbrauch-Sensor (siehe unten) für genaues Verbrauchsprofil
 # ============================================================================
 
 - sensor:
+    # =================================================================
+    # HAUSVERBRAUCH TOTAL (OPTIONAL - für genaues Verbrauchsprofil)
+    # =================================================================
+    # Aktiviere diesen Sensor für ein genaues Verbrauchsprofil inkl.
+    # PV-Eigenverbrauch. Ohne diesen Sensor zeigt das Profil nur Netzbezug.
+    #
+    # ANPASSEN: Ersetze die Sensor-Namen mit deinen eigenen!
+    # Wenn du keinen Hausverbrauch-Sensor brauchst, lösche diesen Block.
+    #
+    # Formel: Netzbezug + PV + Batterie_Out - Einspeisung - Batterie_In
+    # =================================================================
+    # - name: "Hausverbrauch Total"
+    #   unique_id: hausverbrauch_total_wh
+    #   unit_of_measurement: "Wh"
+    #   device_class: energy
+    #   state_class: total_increasing
+    #   icon: mdi:home-lightning-bolt
+    #   state: >
+    #     {% set netzbezug = states('sensor.DEIN_SMARTMETER_IMPORT_WH') | float(0) %}
+    #     {% set einspeisung = states('sensor.DEIN_SMARTMETER_EXPORT_WH') | float(0) %}
+    #     {% set pv_total = states('sensor.DEIN_PV_LIFETIME_ENERGY_WH') | float(0) %}
+    #     {% set batterie_out = states('sensor.DEIN_BATTERIE_DISCHARGE_WH') | float(0) %}
+    #     {% set batterie_in = states('sensor.DEIN_BATTERIE_CHARGE_WH') | float(0) %}
+    #     {{ (netzbezug + pv_total + batterie_out - einspeisung - batterie_in) | round(1) }}
+
     # =================================================================
     # VERBRAUCHSPROGNOSE aus SQL-Sensor
     # =================================================================
