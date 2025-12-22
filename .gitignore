@@ -1,2 +1,6 @@
 # Private Konfigurationen - nicht auf GitHub
 private/
+
+# macOS System-Dateien
+.DS_Store
+**/.DS_Store
