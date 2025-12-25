@@ -168,6 +168,114 @@
           {% endif %}
 
     # =================================================================
+    # PV ÜBERSCHUSS START: Wann ist PV > Verbrauch?
+    # =================================================================
+    # Berechnet die Stunde, ab der PV-Produktion den Verbrauch übersteigt.
+    # Wichtig für realistische Entlade-Entscheidungen!
+    #
+    # Beispiel Winter 08:00:
+    #   PV: 200W, Verbrauch: 300W → Noch kein Überschuss
+    # Beispiel Winter 10:00:
+    #   PV: 800W, Verbrauch: 500W → Überschuss ab hier!
+    # =================================================================
+    - name: "EZHI PV Überschuss Start"
+      unique_id: ezhi_pv_surplus_start
+      icon: mdi:weather-sunny-alert
+      state: >
+        {% set forecasts_heute = state_attr('sensor.solcast_pv_forecast_prognose_heute', 'detailedHourly') %}
+        {% set forecasts_morgen = state_attr('sensor.solcast_pv_forecast_prognose_morgen', 'detailedHourly') %}
+        {% set profil_raw = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
+        {% set profil = profil_raw | from_json if profil_raw else {} %}
+        {% set current_hour = now().hour %}
+        {% set ns = namespace(found_hour=12, checked_tomorrow=false) %}
+        
+        {# Heute durchsuchen #}
+        {% if forecasts_heute and profil %}
+          {% for fc in forecasts_heute %}
+            {% set fc_hour = fc.period_start | as_timestamp | timestamp_custom('%H', true) | int %}
+            {% if fc_hour > current_hour %}
+              {% set pv_wh = (fc.pv_estimate | float(0) * 1000) | int %}
+              {% set verbrauch_wh = profil.get('%02d' % fc_hour, 300) | float(300) | int %}
+              {% if pv_wh > verbrauch_wh and ns.found_hour == 12 %}
+                {% set ns.found_hour = fc_hour %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        
+        {# Wenn heute kein Überschuss gefunden, morgen prüfen #}
+        {% if ns.found_hour == 12 and forecasts_morgen and profil %}
+          {% for fc in forecasts_morgen %}
+            {% set fc_hour = fc.period_start | as_timestamp | timestamp_custom('%H', true) | int %}
+            {% set pv_wh = (fc.pv_estimate | float(0) * 1000) | int %}
+            {% set verbrauch_wh = profil.get('%02d' % fc_hour, 300) | float(300) | int %}
+            {% if pv_wh > verbrauch_wh %}
+              {% set ns.found_hour = fc_hour %}
+              {% set ns.checked_tomorrow = true %}
+              {% break %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        
+        {{ ns.found_hour }}
+      attributes:
+        ist_morgen: >
+          {% set forecasts_heute = state_attr('sensor.solcast_pv_forecast_prognose_heute', 'detailedHourly') %}
+          {% set forecasts_morgen = state_attr('sensor.solcast_pv_forecast_prognose_morgen', 'detailedHourly') %}
+          {% set profil_raw = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
+          {% set profil = profil_raw | from_json if profil_raw else {} %}
+          {% set current_hour = now().hour %}
+          {% set ns = namespace(found_today=false) %}
+          {% if forecasts_heute and profil %}
+            {% for fc in forecasts_heute %}
+              {% set fc_hour = fc.period_start | as_timestamp | timestamp_custom('%H', true) | int %}
+              {% if fc_hour > current_hour %}
+                {% set pv_wh = (fc.pv_estimate | float(0) * 1000) | int %}
+                {% set verbrauch_wh = profil.get('%02d' % fc_hour, 300) | float(300) | int %}
+                {% if pv_wh > verbrauch_wh %}
+                  {% set ns.found_today = true %}
+                  {% break %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {{ not ns.found_today }}
+        
+        stunden_bis_ueberschuss: >
+          {% set start_hour = states('sensor.ezhi_pv_ueberschuss_start') | int(12) %}
+          {% set current_hour = now().hour %}
+          {% set ist_morgen = state_attr('sensor.ezhi_pv_ueberschuss_start', 'ist_morgen') %}
+          {% if ist_morgen %}
+            {{ (24 - current_hour) + start_hour }}
+          {% elif start_hour > current_hour %}
+            {{ start_hour - current_hour }}
+          {% else %}
+            0
+          {% endif %}
+        
+        verbrauch_bis_ueberschuss_wh: >
+          {% set start_hour = states('sensor.ezhi_pv_ueberschuss_start') | int(12) %}
+          {% set current_hour = now().hour %}
+          {% set ist_morgen = state_attr('sensor.ezhi_pv_ueberschuss_start', 'ist_morgen') %}
+          {% set profil_raw = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
+          {% set profil = profil_raw | from_json if profil_raw else {} %}
+          {% set ns = namespace(total=0) %}
+          
+          {% if ist_morgen %}
+            {% set stunden = (24 - current_hour) + start_hour %}
+          {% elif start_hour > current_hour %}
+            {% set stunden = start_hour - current_hour %}
+          {% else %}
+            {% set stunden = 0 %}
+          {% endif %}
+          
+          {% for i in range(stunden) %}
+            {% set h = '%02d' % ((current_hour + i) % 24) %}
+            {% set ns.total = ns.total + (profil.get(h, 300) | float(300)) %}
+          {% endfor %}
+          {{ ns.total | int }}
+
+    # =================================================================
     # SPOT-BEWERTUNG: Kombiniert Preis + PV + Verbrauch
     # =================================================================
     - name: "EZHI Spot Empfehlung"
@@ -202,14 +310,17 @@
     # 5 ZUSTÄNDE:
     # - pv_laden:   PV-Überschuss → Laden auf 100% (kostenlos!)
     # - netz_laden: Kein PV, günstig → Laden aus Netz auf berechnetes Ziel
-    # - entladen:   Teuer + Reserve + PV kommt → Entladen
+    # - entladen:   Teuer + Reserve + PV kommt + GENUG PUFFER → Entladen
     # - halten:     Reserve halten (kein Entladen)
     # - normal:     EZHI selbst regeln lassen
     #
     # PRIORITÄT:
     # 1. SOC-Grenzen prüfen (leer/voll)
     # 2. PV-Situation prüfen (PV-Laden hat Vorrang!)
-    # 3. Dann erst Preis bewerten für Netzladen/Entladen
+    # 3. Energie-Puffer prüfen (reicht Batterie bis PV-Überschuss?)
+    # 4. Dann erst Preis bewerten für Netzladen/Entladen
+    #
+    # ENTLADE-PUFFER: 350Wh Sicherheitsreserve
     # =================================================================
     - name: "EZHI Spot Action"
       unique_id: ezhi_spot_action
@@ -221,6 +332,24 @@
         {% set pv_morgen = states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) %}
         {% set hour = now().hour %}
         {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
+        
+        {# === KONSTANTEN === #}
+        {% set MIN_SOC = 12 %}
+        {% set ENTLADE_PUFFER = 350 %}
+        
+        {# === BATTERIEKAPAZITÄT === #}
+        {% set bat_cap = states('sensor.ezhi_battery_capacity') | float(4800) %}
+        
+        {# === VERFÜGBARE ENERGIE (Wh) === #}
+        {% set verfuegbar_wh = ((soc - MIN_SOC) / 100 * bat_cap) | int %}
+        {% set verfuegbar_wh = [verfuegbar_wh, 0] | max %}
+        
+        {# === VERBRAUCH BIS PV-ÜBERSCHUSS (aus neuem Sensor) === #}
+        {% set verbrauch_bis_pv = state_attr('sensor.ezhi_pv_ueberschuss_start', 'verbrauch_bis_ueberschuss_wh') | int(1500) %}
+        
+        {# === ENERGIE-PUFFER CHECK === #}
+        {% set energie_reicht = (verfuegbar_wh > (verbrauch_bis_pv + ENTLADE_PUFFER)) %}
+        {% set energie_puffer_wh = verfuegbar_wh - verbrauch_bis_pv %}
         
         {# === PV AKTIV? (> 100W in nächster Stunde) === #}
         {% set pv_aktiv = pv_4h > 100 %}
@@ -259,13 +388,17 @@
           {% elif quantile < 0.3 and bilanz < -500 %}
             netz_laden
           
-          {# Teuer (Top 30%) + genug Reserve + PV kommt noch #}
-          {% elif quantile > 0.7 and soc > 30 %}
-            {% if pv_rest_heute > 2 or pv_morgen > 3 %}
+          {# Teuer (Top 30%) + PV kommt + GENUG PUFFER #}
+          {% elif quantile > 0.7 and soc > 30 and (pv_rest_heute > 2 or pv_morgen > 3) %}
+            {% if energie_reicht %}
               entladen
             {% else %}
               halten
             {% endif %}
+          
+          {# Teuer aber nicht genug PV erwartet #}
+          {% elif quantile > 0.7 and soc > 30 %}
+            halten
           
           {# Mittelpreis oder keine klare Situation #}
           {% else %}
@@ -296,6 +429,26 @@
         pv_aktiv: "{{ states('sensor.ezhi_pv_prognose_4h') | int(0) > 100 }}"
         pv_rest_heute_kwh: "{{ states('sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute') | float(0) | round(1) }}"
         pv_morgen_kwh: "{{ states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) | round(1) }}"
+        
+        # Energie-Puffer Berechnung
+        verfuegbar_wh: >
+          {% set soc = states('sensor.battery_soc') | int(50) %}
+          {% set bat_cap = states('sensor.ezhi_battery_capacity') | float(4800) %}
+          {% set verfuegbar = ((soc - 12) / 100 * bat_cap) | int %}
+          {{ [verfuegbar, 0] | max }}
+        verbrauch_bis_pv_wh: "{{ state_attr('sensor.ezhi_pv_ueberschuss_start', 'verbrauch_bis_ueberschuss_wh') | int(0) }}"
+        energie_puffer_wh: >
+          {% set soc = states('sensor.battery_soc') | int(50) %}
+          {% set bat_cap = states('sensor.ezhi_battery_capacity') | float(4800) %}
+          {% set verfuegbar = [((soc - 12) / 100 * bat_cap) | int, 0] | max %}
+          {% set verbrauch = state_attr('sensor.ezhi_pv_ueberschuss_start', 'verbrauch_bis_ueberschuss_wh') | int(0) %}
+          {{ verfuegbar - verbrauch }}
+        energie_reicht_fuer_entladen: >
+          {% set soc = states('sensor.battery_soc') | int(50) %}
+          {% set bat_cap = states('sensor.ezhi_battery_capacity') | float(4800) %}
+          {% set verfuegbar = [((soc - 12) / 100 * bat_cap) | int, 0] | max %}
+          {% set verbrauch = state_attr('sensor.ezhi_pv_ueberschuss_start', 'verbrauch_bis_ueberschuss_wh') | int(0) %}
+          {{ verfuegbar > (verbrauch + 350) }}
 
     # =================================================================
     # SPOT-GRUND: Warum diese Empfehlung?
@@ -313,15 +466,21 @@
         {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
         {% set ziel = state_attr('sensor.ezhi_spot_action', 'ladeziel_soc') | int(soc) %}
         
+        {# Energie-Puffer Werte #}
+        {% set energie_puffer = state_attr('sensor.ezhi_spot_action', 'energie_puffer_wh') | int(0) %}
+        {% set energie_reicht = state_attr('sensor.ezhi_spot_action', 'energie_reicht_fuer_entladen') %}
+        
         {% if action == 'pv_laden' %}
           PV-Überschuss → Lade auf 100% (kostenlos!)
         {% elif action == 'netz_laden' %}
           Günstig ({{ preis }}ct, Q{{ (quantile*100)|round(0) }}%) → Netzladen auf {{ ziel }}%
         {% elif action == 'entladen' %}
-          Teuer ({{ preis }}ct) + {% if pv_rest > 2 %}noch {{ pv_rest|round(1) }}kWh PV heute{% else %}{{ pv_morgen|round(1) }}kWh PV morgen{% endif %} → Entladen
+          Teuer ({{ preis }}ct) + {% if pv_rest > 2 %}{{ pv_rest|round(1) }}kWh PV heute{% else %}{{ pv_morgen|round(1) }}kWh PV morgen{% endif %} + Puffer {{ energie_puffer }}Wh → Entladen
         {% elif action == 'halten' %}
           {% if soc <= 15 %}
             Batterie leer ({{ soc }}%) - Warte auf günstigere Preise
+          {% elif quantile > 0.7 and (pv_rest > 2 or pv_morgen > 3) and not energie_reicht %}
+            Teuer + PV kommt, aber Puffer nur {{ energie_puffer }}Wh (<350Wh) → Halten
           {% elif quantile > 0.7 %}
             Teuer aber wenig PV erwartet → Reserve halten
           {% else %}
