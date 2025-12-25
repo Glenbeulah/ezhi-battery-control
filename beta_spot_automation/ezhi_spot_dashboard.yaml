@@ -1,5 +1,5 @@
 # ============================================================================
-# EZHI Spot-Steuerung v1.1.0-beta - Dashboard
+# EZHI Spot-Steuerung v1.2.0-beta - Dashboard
 # ============================================================================
 # Installation:
 # 1. Einstellungen → Dashboards → Dashboard hinzufügen → "EZHI Spot"
@@ -7,8 +7,9 @@
 # 3. Diesen Inhalt einfügen
 #
 # Benötigt (optional, aber empfohlen):
-# - apexcharts-card (HACS) für Verbrauchsprofil-Grafik
+# - apexcharts-card (HACS) für Preis- und Verbrauchsgrafiken
 # - mushroom-cards (HACS) für schönere Status-Karten
+# - mini-graph-card (HACS) für kompakte Grafiken
 # ============================================================================
 
 title: EZHI Spot-Steuerung
@@ -18,12 +19,12 @@ views:
     icon: mdi:battery-charging
     cards:
       # ================================================================
-      # HEADER: Aktuelle Empfehlung
+      # HEADER
       # ================================================================
       - type: markdown
         content: |
           # 🔋 EZHI Spot-Steuerung
-          **Beta v1.1.0** - Dynamische Batterie-Optimierung
+          **Beta v1.2.0** - Vorausschauende Batterie-Optimierung
 
       # ================================================================
       # STATUS + MODUS (mit Mushroom Cards)
@@ -35,13 +36,15 @@ views:
             secondary: "{{ states('sensor.ezhi_spot_grund') }}"
             icon: >
               {% set action = states('sensor.ezhi_spot_action') %}
-              {% if action == 'laden' %}mdi:battery-charging-high
+              {% if action == 'pv_laden' %}mdi:solar-power
+              {% elif action == 'netz_laden' %}mdi:battery-charging-high
               {% elif action == 'entladen' %}mdi:battery-arrow-down-outline
               {% elif action == 'halten' %}mdi:battery-lock
               {% else %}mdi:battery-50{% endif %}
             icon_color: >
               {% set action = states('sensor.ezhi_spot_action') %}
-              {% if action == 'laden' %}green
+              {% if action == 'pv_laden' %}light-green
+              {% elif action == 'netz_laden' %}green
               {% elif action == 'entladen' %}red
               {% elif action == 'halten' %}amber
               {% else %}blue{% endif %}
@@ -58,19 +61,89 @@ views:
       # ================================================================
       # STATUS (Fallback ohne Mushroom Cards)
       # ================================================================
-      - type: entities
-        title: Status
-        show_header_toggle: false
-        entities:
-          - entity: input_select.ezhi_modus
-            name: Betriebsmodus
-          - entity: sensor.ezhi_spot_action
-            name: Empfehlung
-          - entity: sensor.ezhi_spot_grund
-            name: Begründung
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.ezhi_spot_action
+            state_not: unavailable
+        card:
+          type: entities
+          title: Status (Fallback)
+          show_header_toggle: false
+          entities:
+            - entity: sensor.ezhi_spot_action
+              name: Empfehlung
+            - entity: sensor.ezhi_spot_grund
+              name: Begründung
+            - entity: input_select.ezhi_modus
+              name: Modus
 
       # ================================================================
-      # SPOT-PREISE
+      # 48h STROMPREIS-CHART (NEU!)
+      # ================================================================
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: ⚡ Strompreis 48h Vorschau
+          show_states: true
+          colorize_states: true
+        graph_span: 48h
+        span:
+          start: day
+        now:
+          show: true
+          label: Jetzt
+          color: white
+        yaxis:
+          - id: preis
+            decimals: 2
+            apex_config:
+              tickAmount: 5
+              title:
+                text: ct/kWh
+        series:
+          - entity: sensor.epex_spot_data_market_price
+            name: Strompreis
+            yaxis_id: preis
+            type: column
+            float_precision: 2
+            extend_to: end
+            data_generator: |
+              return entity.attributes.data.map((entry) => {
+                return [new Date(entry.start_time).getTime(), entry.price_per_kwh * 100];
+              });
+            color_threshold:
+              - value: 0
+                color: "#186ddc"
+              - value: 5
+                color: "#04822e"
+              - value: 6
+                color: "#12A141"
+              - value: 7
+                color: "#79B92C"
+              - value: 8
+                color: "#C4D81D"
+              - value: 9
+                color: "#F3DC0C"
+              - value: 10
+                color: "#FFA500"
+              - value: 12
+                color: "#FF6347"
+              - value: 15
+                color: "#FF0000"
+        experimental:
+          color_threshold: true
+        apex_config:
+          chart:
+            height: 250
+          tooltip:
+            x:
+              format: "dd.MM HH:mm"
+          legend:
+            show: false
+
+      # ================================================================
+      # SPOT-PREISE KOMPAKT
       # ================================================================
       - type: vertical-stack
         cards:
@@ -99,13 +172,20 @@ views:
             entity: sensor.epex_spot_data_market_price
             name: Strompreis
             unit: ct/kWh
-            min: -5
-            max: 50
-            severity:
-              green: -5
-              yellow: 15
-              red: 30
+            min: 0
+            max: 15
             needle: true
+            segments:
+              - from: 0
+                color: "#04822e"
+              - from: 5
+                color: "#79B92C"
+              - from: 7
+                color: "#C4D81D"
+              - from: 9
+                color: "#FFA500"
+              - from: 12
+                color: "#FF0000"
 
       # ================================================================
       # ENERGIE-BILANZ (nächste 4 Stunden)
@@ -138,6 +218,11 @@ views:
                 entity: sensor.ezhi_erwarteter_verbrauch_stunde
                 attribute: naechste_stunde
                 name: Verbrauch nächste Stunde
+                suffix: " Wh"
+              - type: attribute
+                entity: sensor.ezhi_erwarteter_verbrauch_stunde
+                attribute: naechste_4_stunden
+                name: Verbrauch nächste 4h
                 suffix: " Wh"
               - type: attribute
                 entity: sensor.ezhi_energie_bilanz_4h
@@ -197,6 +282,11 @@ views:
       # ================================================================
       # VERBRAUCHSPROFIL (ApexCharts)
       # ================================================================
+      - type: markdown
+        content: |
+          ## 📊 Verbrauchsprofil
+          *Durchschnitt der letzten 7 Tage pro Stunde*
+
       - type: custom:apexcharts-card
         header:
           show: true
@@ -211,24 +301,35 @@ views:
           xaxis:
             labels:
               format: HH
+          plotOptions:
+            bar:
+              distributed: true
+          legend:
+            show: false
         series:
           - entity: sensor.ezhi_verbrauchsprofil_7_tage
             name: Verbrauch
             type: column
-            color: "#4db6ac"
             data_generator: |
               const data = entity.attributes.hourly_json;
               if (!data) return [];
-              const now = new Date();
-              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
               let json = data;
               if (typeof data === 'string') {
                 try { json = JSON.parse(data); } catch(e) { return []; }
               }
+              const values = Object.values(json).map(v => parseFloat(v));
+              const sorted = [...values].sort((a, b) => a - b);
+              const low = sorted[Math.floor(sorted.length * 0.3)];
+              const high = sorted[Math.floor(sorted.length * 0.7)];
+              const now = new Date();
+              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
               return Object.entries(json).map(([hour, value]) => {
                 const time = new Date(today.getTime() + parseInt(hour) * 3600000);
-                return [time.getTime(), value];
-              }).sort((a, b) => a[0] - b[0]);
+                let color = '#ffc107';
+                if (value <= low) color = '#4caf50';
+                if (value >= high) color = '#f44336';
+                return { x: time.getTime(), y: value, fillColor: color };
+              }).sort((a, b) => a.x - b.x);
 
       # ================================================================
       # HISTORY GRAPH

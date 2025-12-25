@@ -1,10 +1,16 @@
 # ============================================================================
-# EZHI Batterie-Regelung Blueprint v1.0.0 - LIGHT
+# EZHI Batterie-Regelung Blueprint v1.0.4 - LIGHT
 # ============================================================================
 # Intelligente Batterie-Steuerung für APsystems EZHI Hybrid-Wechselrichter
 # 
 # LIGHT VERSION: Nur 1 Helfer nötig (input_datetime.last_peak)
 # Alle anderen Werte werden direkt im Blueprint konfiguriert.
+#
+# CHANGELOG v1.0.4:
+# - FIX: Bei WR-Timeout stabilen Aufwach-Wert (-50W) statt 0W setzen
+# - NEU: Totband (30W) verhindert Oszillationen bei kleinen Änderungen
+# - NEU: Optionaler Batterie-Leistungs-Sensor für Timeout-Erkennung
+# - VERBESSERT: Brutto-Überschuss-Berechnung berücksichtigt aktuelle WR-Leistung
 #
 # INSTALLATION:
 # 1. Diese Datei nach /config/blueprints/automation/ezhi/ kopieren
@@ -14,7 +20,7 @@
 # ============================================================================
 
 blueprint:
-  name: EZHI Batterie-Regelung v1.0.0 LIGHT
+  name: EZHI Batterie-Regelung v1.0.4 LIGHT
   description: |
     Intelligente Nulleinspeisung für APsystems EZHI - **nur 1 Helfer nötig!**
     
@@ -24,6 +30,11 @@ blueprint:
     - Asymmetrische Rampe (schnell runter, langsam hoch)
     - SOC-Schutz mit PV-Laden (kein Netzladen!)
     - Alle Parameter direkt im Blueprint einstellbar
+    
+    **v1.0.4 Änderungen:**
+    - Bei WR-Timeout: stabiler Aufwach-Wert (-50W) statt 0W
+    - Totband (30W) verhindert Oszillationen
+    - Verbesserte Brutto-Überschuss-Berechnung
     
     **Benötigt:**
     - APsystems EZHI Integration (kamilkosek/EZHI)
@@ -38,7 +49,7 @@ blueprint:
   author: Glenbeulah
   
   input:
-    # === SENSOREN (4 Sensoren + 1 Helfer) ===
+    # === SENSOREN (4-5 Sensoren + 1 Helfer) ===
     grid_power_sensor:
       name: Netzleistungs-Sensor
       description: "Sensor für Netzleistung in Watt (positiv=Bezug, negativ=Einspeisung)"
@@ -65,6 +76,15 @@ blueprint:
     pv_power_sensor:
       name: PV-Leistungs-Sensor
       description: "Gesamte PV-Produktion in Watt"
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+    
+    battery_power_sensor:
+      name: Batterie-Leistungs-Sensor (Optional)
+      description: "Tatsächliche Batterieleistung (für Timeout-Erkennung)"
+      default: ""
       selector:
         entity:
           domain: sensor
@@ -194,6 +214,7 @@ variables:
   wr_number: !input ezhi_on_grid_power
   soc_sensor: !input battery_soc_sensor
   pv_sensor: !input pv_power_sensor
+  batt_power_sensor: !input battery_power_sensor
   peak_time_input: !input peak_timestamp_helper
   
   # Blueprint-Parameter
@@ -211,24 +232,44 @@ variables:
   aktuell: "{{ states(wr_number) | float(0) }}"
   soc: "{{ states(soc_sensor) | float(0) }}"
   pv_power: "{{ states(pv_sensor) | float(0) }}"
+  wr_istwert: >
+    {% if batt_power_sensor %}
+      {{ states(batt_power_sensor) | float(0) }}
+    {% else %}
+      {{ aktuell }}
+    {% endif %}
+  wr_im_timeout: "{{ batt_power_sensor and (aktuell | abs) > 50 and (wr_istwert | abs) < 10 }}"
   
-  # SOC-Schutz Parameter (fest)
-  soc_schutz_puffer: 40
-  soc_schutz_rampe: 70
+  # SOC-Schutz Parameter (v1.0.4)
+  soc_schutz_puffer: 70
+  soc_schutz_rampe: 40
   soc_schutz_min_ladung: 30
+  soc_schutz_totband: 30
+  soc_schutz_aufwach_wert: -50
   
-  # SOC-Schutz Ladewert-Berechnung
+  # SOC-Schutz Ladewert-Berechnung (v1.0.4)
   soc_schutz_ladewert: |
-    {% if pv_power > 10 and istwert < -50 %}
+    {# === TIMEOUT-SCHUTZ (v1.0.4) === #}
+    {% if wr_im_timeout %}
+      {{ soc_schutz_aufwach_wert }}
+    {% elif pv_power > 10 and istwert < -30 %}
+      {# === PV-LADEN MÖGLICH === #}
       {% set ueberschuss = istwert | float %}
-      {% set ziel = ueberschuss + aktuell + soc_schutz_puffer %}
+      {# Brutto-Überschuss: Netz + was WR bereits lädt #}
+      {% set ziel = ueberschuss - wr_istwert + soc_schutz_puffer %}
+      
       {% if ziel < min_inverter %}
         {% set ziel = min_inverter %}
       {% endif %}
       {% if ziel > -soc_schutz_min_ladung %}
         {% set ziel = -soc_schutz_min_ladung %}
       {% endif %}
-      {% if aktuell > ziel %}
+      
+      {# === TOTBAND: Nur ändern wenn Differenz > 30W === #}
+      {% set differenz = (aktuell - ziel) | abs %}
+      {% if differenz < soc_schutz_totband %}
+        {{ aktuell | round(0) }}
+      {% elif aktuell > ziel %}
         {% set neuer_wert = aktuell - soc_schutz_rampe %}
         {% if neuer_wert < ziel %}
           {% set neuer_wert = ziel %}

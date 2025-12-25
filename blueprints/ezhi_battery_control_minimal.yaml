@@ -1,7 +1,12 @@
 # ============================================================================
-# EZHI Batterie-Regelung Blueprint v1.0.0
+# EZHI Batterie-Regelung Blueprint v1.0.4 - Minimal
 # ============================================================================
 # Intelligente Batterie-Steuerung für APsystems EZHI Hybrid-Wechselrichter
+#
+# CHANGELOG v1.0.4:
+# - FIX: Bei WR-Timeout stabilen Aufwach-Wert (-50W) statt 0W setzen
+# - NEU: Totband (30W) verhindert Oszillationen bei kleinen Änderungen
+# - VERBESSERT: Brutto-Überschuss-Berechnung berücksichtigt aktuelle WR-Leistung
 #
 # INSTALLATION:
 # 1. Diese Datei nach /config/blueprints/automation/ezhi/ kopieren
@@ -10,7 +15,7 @@
 # ============================================================================
 
 blueprint:
-  name: EZHI Batterie-Regelung v1.0.0
+  name: EZHI Batterie-Regelung v1.0.4 Minimal
   description: |
     Intelligente Nulleinspeisung mit Batterie-Strategie für APsystems EZHI.
     
@@ -19,6 +24,11 @@ blueprint:
     - Asymmetrische Rampe und Anti-Oszillations-Logik
     - SOC-Schutz mit PV-Laden (kein Netzladen!)
     - Solarprognose-basierte Entladetiefe
+    
+    **v1.0.4 Änderungen:**
+    - Bei WR-Timeout: stabiler Aufwach-Wert (-50W) statt 0W
+    - Totband (30W) verhindert Oszillationen
+    - Verbesserte Brutto-Überschuss-Berechnung
     
     **Voraussetzungen:**
     - APsystems EZHI Integration (kamilkosek/EZHI)
@@ -173,13 +183,6 @@ blueprint:
       default: true
       selector:
         boolean:
-    
-    enable_notifications:
-      name: Notifications aktivieren
-      description: "Persistent Notifications bei wichtigen Events"
-      default: true
-      selector:
-        boolean:
 
 # ============================================================================
 # TRIGGER
@@ -220,7 +223,6 @@ variables:
   min_inv: !input min_inverter_power
   max_inv: !input max_inverter_power
   do_logging: !input enable_logging
-  do_notifications: !input enable_notifications
   
   # Sensor-Werte
   istwert: "{{ states(grid_sensor) | float(0) }}"
@@ -268,22 +270,36 @@ variables:
   min_inverter: "{{ min_inv }}"
   max_inverter: "{{ max_inv }}"
   
-  # SOC-Schutz Parameter
-  soc_schutz_puffer: 40
-  soc_schutz_rampe: 70
+  # SOC-Schutz Parameter (v1.0.4)
+  soc_schutz_puffer: 70
+  soc_schutz_rampe: 40
   soc_schutz_min_ladung: 30
+  soc_schutz_totband: 30
+  soc_schutz_aufwach_wert: -50
   
+  # SOC-Schutz Ladewert-Berechnung (v1.0.4)
   soc_schutz_ladewert: |
-    {% if pv_power > 10 and istwert < -50 %}
+    {# === TIMEOUT-SCHUTZ (v1.0.4) === #}
+    {% if wr_im_timeout %}
+      {{ soc_schutz_aufwach_wert }}
+    {% elif pv_power > 10 and istwert < -30 %}
+      {# === PV-LADEN MÖGLICH === #}
       {% set ueberschuss = istwert | float %}
-      {% set ziel = ueberschuss + aktuell + soc_schutz_puffer %}
+      {# Brutto-Überschuss: Netz + was WR bereits lädt #}
+      {% set ziel = ueberschuss - wr_istwert + soc_schutz_puffer %}
+      
       {% if ziel < min_inverter %}
         {% set ziel = min_inverter %}
       {% endif %}
       {% if ziel > -soc_schutz_min_ladung %}
         {% set ziel = -soc_schutz_min_ladung %}
       {% endif %}
-      {% if aktuell > ziel %}
+      
+      {# === TOTBAND: Nur ändern wenn Differenz > 30W === #}
+      {% set differenz = (aktuell - ziel) | abs %}
+      {% if differenz < soc_schutz_totband %}
+        {{ aktuell | round(0) }}
+      {% elif aktuell > ziel %}
         {% set neuer_wert = aktuell - soc_schutz_rampe %}
         {% if neuer_wert < ziel %}
           {% set neuer_wert = ziel %}
@@ -382,7 +398,11 @@ action:
             then:
               - service: system_log.write
                 data:
-                  message: "[SOC-SCHUTZ] {{ soc }}% ≤ {{ entlade_limit }}%"
+                  message: >-
+                    [SOC-SCHUTZ] {{ soc }}% ≤ {{ entlade_limit }}% – 
+                    {% if wr_im_timeout %}[TIMEOUT] Aufwach-Wert → {{ soc_schutz_aufwach_wert }}W
+                    {% elif pv_power > 10 and istwert < -30 %}PV-Laden: {{ soc_schutz_ladewert }}W
+                    {% else %}Kein PV, WR → 0W{% endif %}
                   level: info
           - service: number.set_value
             target:
@@ -410,7 +430,7 @@ action:
             data:
               message: >
                 [REGELUNG] ist={{ istwert }}W, neu={{ new_value }}W, 
-                peak={{ peak_level }}, faktor={{ faktor }}
+                peak={{ peak_level }}, faktor={{ faktor | round(2) }}
               level: info
       
       - if:

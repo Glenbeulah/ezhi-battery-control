@@ -7,11 +7,19 @@
 #
 # BENÖTIGT:
 # - ezhi_spot_sql.yaml für Verbrauchsprofil
-# - EPEX Spot Integration (HACS)
-# - Solcast Integration (HACS)
+# - EPEX Spot Integration (HACS): https://github.com/mampfes/ha_epex_spot
+# - Solcast Integration (HACS): https://github.com/BJReplay/ha-solcast-solar
 #
 # OPTIONAL:
 # - Hausverbrauch-Sensor (siehe unten) für genaues Verbrauchsprofil
+#
+# CHANGELOG v1.1.0:
+# - NEU: 5 Action-Zustände (pv_laden, netz_laden, entladen, halten, normal)
+# - NEU: SOC-Grenzen-Schutz (≤15% / ≥90%)
+# - NEU: MIN_SOC = 13% (EZHI Hardware-Minimum ist 12%)
+# - FIX: sensor.battery_soc konsistent verwendet
+# - FIX: Preisanzeige in ct/kWh (war €/kWh)
+# - VERBESSERT: Intelligente Netzladen-Zielberechnung
 # ============================================================================
 
 - sensor:
@@ -25,6 +33,8 @@
     # Wenn du keinen Hausverbrauch-Sensor brauchst, lösche diesen Block.
     #
     # Formel: Netzbezug + PV + Batterie_Out - Einspeisung - Batterie_In
+    #
+    # WICHTIG: Batterie-Sensoren sind oft in kWh statt Wh!
     # =================================================================
     # - name: "Hausverbrauch Total"
     #   unique_id: hausverbrauch_total_wh
@@ -36,8 +46,9 @@
     #     {% set netzbezug = states('sensor.DEIN_SMARTMETER_IMPORT_WH') | float(0) %}
     #     {% set einspeisung = states('sensor.DEIN_SMARTMETER_EXPORT_WH') | float(0) %}
     #     {% set pv_total = states('sensor.DEIN_PV_LIFETIME_ENERGY_WH') | float(0) %}
-    #     {% set batterie_out = states('sensor.DEIN_BATTERIE_DISCHARGE_WH') | float(0) %}
-    #     {% set batterie_in = states('sensor.DEIN_BATTERIE_CHARGE_WH') | float(0) %}
+    #     {# Batterie: Falls in kWh, dann * 1000 für Wh #}
+    #     {% set batterie_out = states('sensor.DEIN_BATTERIE_DISCHARGE_KWH') | float(0) * 1000 %}
+    #     {% set batterie_in = states('sensor.DEIN_BATTERIE_CHARGE_KWH') | float(0) * 1000 %}
     #     {{ (netzbezug + pv_total + batterie_out - einspeisung - batterie_in) | round(1) }}
 
     # =================================================================
@@ -96,9 +107,10 @@
           {% set ns = namespace(total=0) %}
           {% for i in range(1, 5) %}
             {% set target_hour = (now_hour + i) % 24 %}
-            {% set target_str = '%sT%02d:00:00' % (today, target_hour) %}
+            {% set target_str = today ~ 'T' ~ '%02d' | format(target_hour) ~ ':00:00' %}
             {% for fc in forecasts %}
-              {% if target_str in fc.period_start %}
+              {% set fc_time = fc.period_start | as_timestamp | timestamp_custom('%Y-%m-%dT%H:%M:%S', true) %}
+              {% if fc_time is defined and target_str in fc_time %}
                 {% set ns.total = ns.total + (fc.pv_estimate | float(0) * 1000) %}
               {% endif %}
             {% endfor %}
@@ -116,9 +128,10 @@
             {% set ns = namespace(hours=[]) %}
             {% for i in range(1, 5) %}
               {% set target_hour = (now_hour + i) % 24 %}
-              {% set target_str = '%sT%02d:00:00' % (today, target_hour) %}
+              {% set target_str = today ~ 'T' ~ '%02d' | format(target_hour) ~ ':00:00' %}
               {% for fc in forecasts %}
-                {% if target_str in fc.period_start %}
+                {% set fc_time = fc.period_start | as_timestamp | timestamp_custom('%Y-%m-%dT%H:%M:%S', true) %}
+                {% if fc_time is defined and target_str in fc_time %}
                   {% set ns.hours = ns.hours + [{'hour': target_hour, 'wh': (fc.pv_estimate | float(0) * 1000) | round(0)}] %}
                 {% endif %}
               {% endfor %}
@@ -161,7 +174,7 @@
       unique_id: ezhi_spot_recommendation
       icon: >
         {% set action = states('sensor.ezhi_spot_action') %}
-        {% if action == 'laden' %}
+        {% if action in ['pv_laden', 'netz_laden'] %}
           mdi:battery-charging
         {% elif action == 'entladen' %}
           mdi:battery-arrow-down
@@ -172,7 +185,7 @@
         {% endif %}
       state: "{{ states('sensor.ezhi_spot_action') }}"
       attributes:
-        spot_preis: "{{ states('sensor.epex_spot_data_market_price') | float(0) }}"
+        spot_preis_ct: "{{ (states('sensor.epex_spot_data_market_price') | float(0) * 100) | round(2) }}"
         spot_rank: "{{ states('sensor.epex_spot_data_rank') | int(12) }}"
         spot_quantile: "{{ states('sensor.epex_spot_data_quantile') | float(0.5) }}"
         pv_4h_wh: "{{ states('sensor.ezhi_pv_prognose_4h') | int(0) }}"
@@ -186,45 +199,103 @@
     # =================================================================
     # SPOT-AKTION: Was soll die Batterie tun?
     # =================================================================
+    # 5 ZUSTÄNDE:
+    # - pv_laden:   PV-Überschuss → Laden auf 100% (kostenlos!)
+    # - netz_laden: Kein PV, günstig → Laden aus Netz auf berechnetes Ziel
+    # - entladen:   Teuer + Reserve + PV kommt → Entladen
+    # - halten:     Reserve halten (kein Entladen)
+    # - normal:     EZHI selbst regeln lassen
+    #
+    # PRIORITÄT:
+    # 1. SOC-Grenzen prüfen (leer/voll)
+    # 2. PV-Situation prüfen (PV-Laden hat Vorrang!)
+    # 3. Dann erst Preis bewerten für Netzladen/Entladen
+    # =================================================================
     - name: "EZHI Spot Action"
       unique_id: ezhi_spot_action
       state: >
-        {% set rank = states('sensor.epex_spot_data_rank') | int(12) %}
         {% set quantile = states('sensor.epex_spot_data_quantile') | float(0.5) %}
+        {% set soc = states('sensor.battery_soc') | int(50) %}
         {% set pv_4h = states('sensor.ezhi_pv_prognose_4h') | int(0) %}
+        {% set pv_rest_heute = states('sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute') | float(0) %}
         {% set pv_morgen = states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) %}
         {% set hour = now().hour %}
         {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
-        {% set verbrauch_4h = state_attr('sensor.ezhi_erwarteter_verbrauch_stunde', 'naechste_4_stunden') | int(1200) %}
         
-        {# === BILLIGSTE STUNDEN (Rang 1-4 oder Quantil < 0.2) === #}
-        {% if rank <= 4 or quantile < 0.2 %}
-          {# Nicht laden wenn genug PV in den nächsten 4h kommt #}
-          {% if bilanz > 2000 %}
-            normal
+        {# === PV AKTIV? (> 100W in nächster Stunde) === #}
+        {% set pv_aktiv = pv_4h > 100 %}
+        
+        {# === BATTERIE FAST LEER (≤15%) - NIEMALS ENTLADEN === #}
+        {% if soc <= 15 %}
+          {% if pv_aktiv %}
+            pv_laden
+          {% elif quantile < 0.3 %}
+            netz_laden
           {% else %}
-            laden
+            halten
           {% endif %}
         
-        {# === TEUERSTE STUNDEN (Rang 21-24 oder Quantil > 0.8) === #}
-        {% elif rank >= 21 or quantile > 0.8 %}
-          entladen
-        
-        {# === MITTLERER BEREICH === #}
-        {% else %}
-          {# Viel PV in nächsten 4h erwartet: Batterie schonen #}
-          {% if bilanz > 1000 %}
-            halten
-          {# Abends mit guter Prognose morgen: Batterie schonen #}
-          {% elif hour >= 18 and pv_morgen > 5 %}
-            halten
-          {# Energie-Defizit erwartet: Normal regeln #}
-          {% elif bilanz < -500 %}
+        {# === BATTERIE FAST VOLL (≥90%) === #}
+        {% elif soc >= 90 %}
+          {% if pv_aktiv and soc < 100 %}
+            pv_laden
+          {% elif quantile > 0.7 and (pv_rest_heute > 2 or pv_morgen > 3) %}
+            entladen
+          {% else %}
             normal
+          {% endif %}
+        
+        {# === PV AKTIV - IMMER PV-LADEN BIS 100% === #}
+        {% elif pv_aktiv and bilanz > 0 %}
+          pv_laden
+        
+        {# === KEIN PV - PREISBASIERTE ENTSCHEIDUNG === #}
+        {% else %}
+          {# Sehr billig (Top 20%) + Defizit erwartet → Netzladen #}
+          {% if quantile < 0.2 and bilanz < 500 %}
+            netz_laden
+          
+          {# Billig (Top 30%) + großes Defizit → Netzladen #}
+          {% elif quantile < 0.3 and bilanz < -500 %}
+            netz_laden
+          
+          {# Teuer (Top 30%) + genug Reserve + PV kommt noch #}
+          {% elif quantile > 0.7 and soc > 30 %}
+            {% if pv_rest_heute > 2 or pv_morgen > 3 %}
+              entladen
+            {% else %}
+              halten
+            {% endif %}
+          
+          {# Mittelpreis oder keine klare Situation #}
           {% else %}
             normal
           {% endif %}
         {% endif %}
+      attributes:
+        ladequelle: >
+          {% set action = states('sensor.ezhi_spot_action') %}
+          {% if action == 'pv_laden' %}
+            PV (kostenlos)
+          {% elif action == 'netz_laden' %}
+            Netz (Spot-Preis)
+          {% else %}
+            Keine
+          {% endif %}
+        
+        ladeziel_soc: >
+          {% set action = states('sensor.ezhi_spot_action') %}
+          {% if action == 'pv_laden' %}
+            100
+          {% elif action == 'netz_laden' %}
+            {{ states('sensor.ezhi_spot_netzladen_max_soc') | int(50) }}
+          {% else %}
+            {{ states('sensor.battery_soc') | int(50) }}
+          {% endif %}
+        
+        pv_aktiv: "{{ states('sensor.ezhi_pv_prognose_4h') | int(0) > 100 }}"
+        pv_rest_heute_kwh: "{{ states('sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute') | float(0) | round(1) }}"
+        pv_morgen_kwh: "{{ states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) | round(1) }}"
 
     # =================================================================
     # SPOT-GRUND: Warum diese Empfehlung?
@@ -232,31 +303,32 @@
     - name: "EZHI Spot Grund"
       unique_id: ezhi_spot_grund
       state: >
-        {% set rank = states('sensor.epex_spot_data_rank') | int(12) %}
+        {% set action = states('sensor.ezhi_spot_action') %}
         {% set quantile = states('sensor.epex_spot_data_quantile') | float(0.5) %}
+        {% set soc = states('sensor.battery_soc') | int(50) %}
         {% set pv_4h = states('sensor.ezhi_pv_prognose_4h') | int(0) %}
+        {% set pv_rest = states('sensor.solcast_pv_forecast_prognose_verbleibende_leistung_heute') | float(0) %}
         {% set pv_morgen = states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) %}
-        {% set hour = now().hour %}
-        {% set preis = states('sensor.epex_spot_data_market_price') | float(0) %}
+        {% set preis = (states('sensor.epex_spot_data_market_price') | float(0) * 100) | round(1) %}
         {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
-        {% set verbrauch_h = states('sensor.ezhi_erwarteter_verbrauch_stunde') | int(300) %}
+        {% set ziel = state_attr('sensor.ezhi_spot_action', 'ladeziel_soc') | int(soc) %}
         
-        {% if rank <= 4 or quantile < 0.2 %}
-          {% if bilanz > 2000 %}
-            Billig ({{ preis | round(1) }}ct), aber +{{ (bilanz/1000) | round(1) }}kWh PV in 4h
+        {% if action == 'pv_laden' %}
+          PV-Überschuss → Lade auf 100% (kostenlos!)
+        {% elif action == 'netz_laden' %}
+          Günstig ({{ preis }}ct, Q{{ (quantile*100)|round(0) }}%) → Netzladen auf {{ ziel }}%
+        {% elif action == 'entladen' %}
+          Teuer ({{ preis }}ct) + {% if pv_rest > 2 %}noch {{ pv_rest|round(1) }}kWh PV heute{% else %}{{ pv_morgen|round(1) }}kWh PV morgen{% endif %} → Entladen
+        {% elif action == 'halten' %}
+          {% if soc <= 15 %}
+            Batterie leer ({{ soc }}%) - Warte auf günstigere Preise
+          {% elif quantile > 0.7 %}
+            Teuer aber wenig PV erwartet → Reserve halten
           {% else %}
-            Billigste Stunden (Rang {{ rank }}, {{ preis | round(1) }}ct) - Laden!
+            Mittlerer Preis ({{ preis }}ct) → Batterie schonen
           {% endif %}
-        {% elif rank >= 21 or quantile > 0.8 %}
-          Teuerste Stunden (Rang {{ rank }}, {{ preis | round(1) }}ct) - Entladen!
-        {% elif bilanz > 1000 %}
-          PV-Überschuss in 4h (+{{ (bilanz/1000) | round(1) }}kWh) - Batterie schonen
-        {% elif hour >= 18 and pv_morgen > 5 %}
-          Abend, morgen {{ pv_morgen | round(1) }}kWh PV - Batterie schonen
-        {% elif bilanz < -500 %}
-          Defizit in 4h ({{ (bilanz/1000) | round(1) }}kWh) - Normal regeln
         {% else %}
-          Normale Stunde (Rang {{ rank }}, ~{{ verbrauch_h }}Wh Verbrauch)
+          Normal ({{ preis }}ct, SOC {{ soc }}%)
         {% endif %}
 
     # =================================================================
@@ -268,7 +340,7 @@
       state: >
         {% set action = states('sensor.ezhi_spot_action') %}
         {% set quantile = states('sensor.epex_spot_data_quantile') | float(0.5) %}
-        {% if action == 'laden' %}
+        {% if action in ['pv_laden', 'netz_laden'] %}
           {{ ((1 - quantile) * 100) | round(0) }}
         {% elif action == 'entladen' %}
           {{ (quantile * -100) | round(0) }}
@@ -279,7 +351,10 @@
         {% endif %}
 
     # =================================================================
-    # DYNAMISCHES ENTLADE-LIMIT basierend auf Spot + Verbrauch
+    # DYNAMISCHES ENTLADE-LIMIT basierend auf SOC + Spot + PV
+    # =================================================================
+    # WICHTIG: EZHI schaltet bei 12% selbst ab!
+    # Daher ist 13% das absolute Minimum (mit Puffer)
     # =================================================================
     - name: "EZHI Dynamisches Entlade-Limit"
       unique_id: ezhi_dynamic_discharge_limit
@@ -287,62 +362,415 @@
       state: >
         {% set basis = states('input_number.entlade_limit') | float(20) %}
         {% set action = states('sensor.ezhi_spot_action') %}
+        {% set soc = states('sensor.battery_soc') | int(50) %}
         {% set pv_morgen = states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) %}
         {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
+        {% set hour = now().hour %}
+        {% set MIN_SOC = 13 %}
         
-        {% if action == 'entladen' %}
-          {# Teuer: Tiefer entladen erlaubt #}
-          {% if pv_morgen > 5 %}
-            {# Morgen viel PV: Noch tiefer ok #}
-            {{ (basis - 10) | max(5) }}
-          {% elif bilanz > 0 %}
-            {# Heute noch Überschuss erwartet #}
-            {{ (basis - 7) | max(8) }}
+        {# Nachts ohne PV morgen: Höheres Limit (Reserve halten) #}
+        {% if hour >= 22 or hour < 6 %}
+          {% if pv_morgen < 3 %}
+            {{ [basis + 10, 40] | min }}
           {% else %}
-            {{ (basis - 5) | max(10) }}
+            {{ basis }}
           {% endif %}
+        
+        {# Entladen-Empfehlung: Tieferes Limit erlaubt, aber nie unter MIN_SOC #}
+        {% elif action == 'entladen' %}
+          {% if pv_morgen > 5 %}
+            {{ [basis - 10, MIN_SOC] | max }}
+          {% elif bilanz > 0 %}
+            {{ [basis - 7, MIN_SOC] | max }}
+          {% else %}
+            {{ [basis - 5, MIN_SOC] | max }}
+          {% endif %}
+        
+        {# Halten-Empfehlung: Höheres Limit #}
         {% elif action == 'halten' %}
-          {# Halten: Höheres Limit #}
-          {{ (basis + 15) | min(50) }}
+          {{ [basis + 15, 50] | min }}
+        
+        {# Sonst: Basis (aber nie unter MIN_SOC) #}
         {% else %}
-          {{ basis }}
+          {{ [basis, MIN_SOC] | max }}
         {% endif %}
 
     # =================================================================
-    # MAX SOC FÜR NETZLADEN (abhängig von PV + Verbrauch)
+    # MAX SOC FÜR NETZLADEN - INTELLIGENT
+    # =================================================================
+    # Berechnet das optimale Ladeziel basierend auf:
+    # - Verbrauch bis PV verfügbar (aus Stundenprofil)
+    # - Aktueller SOC und verfügbare Energie
+    # - Billigstrom-Bonus bei sehr günstigen Preisen
+    #
+    # KONSTANTEN (anpassen!):
+    # - BATTERIE_KAPAZITAET: Deine Batteriekapazität in Wh
+    # - MIN_SOC: EZHI Minimum (12%) + Puffer
     # =================================================================
     - name: "EZHI Spot Netzladen Max SOC"
       unique_id: ezhi_spot_grid_charge_max_soc
       unit_of_measurement: "%"
       state: >
-        {% set pv_4h = states('sensor.ezhi_pv_prognose_4h') | int(0) %}
-        {% set pv_morgen = states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) %}
+        {# === BATTERIEKAPAZITÄT AUS SENSOR === #}
+        {% set BATTERIE_KAPAZITAET = states('sensor.ezhi_battery_capacity') | float(4800) %}
+        {% set MIN_SOC = 12 %}
+        {% set PUFFER_STUNDEN = 1 %}
+        {% set DEFAULT_VERBRAUCH_H = 200 %}
+        
+        {# === AKTUELLE WERTE === #}
+        {% set soc = states('sensor.battery_soc') | int(50) %}
         {% set hour = now().hour %}
-        {% set bilanz = states('sensor.ezhi_energie_bilanz_4h') | int(0) %}
-        {% set verbrauch_4h = state_attr('sensor.ezhi_erwarteter_verbrauch_stunde', 'naechste_4_stunden') | int(1200) %}
+        {% set quantile = states('sensor.epex_spot_data_quantile') | float(0.5) %}
         
-        {# Nachts (00-06): Mehr laden wenn morgen wenig PV oder hoher Verbrauch #}
-        {% if hour < 6 %}
-          {% if pv_morgen < 2 %}
-            80
-          {% elif pv_morgen < 5 and verbrauch_4h > 1500 %}
-            70
-          {% elif pv_morgen < 5 %}
-            60
-          {% else %}
-            40
-          {% endif %}
-        
-        {# Tagsüber: Weniger aus Netz, PV kommt #}
+        {# === VERBRAUCHSPROFIL LADEN === #}
+        {% set profil_raw = state_attr('sensor.ezhi_verbrauchsprofil_7_tage', 'hourly_json') %}
+        {% if profil_raw %}
+          {% set profil = profil_raw | from_json if profil_raw is string else profil_raw %}
         {% else %}
-          {% if bilanz < -1000 %}
-            {# Großes Defizit erwartet #}
-            60
-          {% elif bilanz < 0 %}
-            {# Leichtes Defizit #}
-            40
-          {% else %}
-            {# Überschuss erwartet #}
-            30
-          {% endif %}
+          {% set profil = {} %}
         {% endif %}
+        
+        {# === PV PROGNOSE - WANN KOMMT RELEVANTE PV (> 100W)? === #}
+        {% set forecasts = state_attr('sensor.solcast_pv_forecast_prognose_heute', 'detailedHourly') %}
+        {% set ns = namespace(pv_start_hour=8) %}
+        {% if forecasts %}
+          {% for fc in forecasts %}
+            {% if fc.pv_estimate | float(0) > 0.1 %}
+              {% set fc_hour = fc.period_start | as_timestamp | timestamp_custom('%H', true) | int %}
+              {% set ns.pv_start_hour = fc_hour %}
+              {% break %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        
+        {# === BERECHNE STUNDEN BIS PV === #}
+        {% if hour >= ns.pv_start_hour %}
+          {% set stunden_bis_pv = (24 - hour) + ns.pv_start_hour %}
+        {% else %}
+          {% set stunden_bis_pv = ns.pv_start_hour - hour %}
+        {% endif %}
+        
+        {# === SUMMIERE VERBRAUCH BIS PV + PUFFER === #}
+        {% set ns = namespace(verbrauch_total=0) %}
+        {% for i in range(stunden_bis_pv + PUFFER_STUNDEN) %}
+          {% set h = '%02d' % ((hour + i) % 24) %}
+          {% set verbrauch_h = profil.get(h, DEFAULT_VERBRAUCH_H) | float(DEFAULT_VERBRAUCH_H) %}
+          {% set ns.verbrauch_total = ns.verbrauch_total + verbrauch_h %}
+        {% endfor %}
+        
+        {# === BERECHNE VERFÜGBARE ENERGIE (über Min-SOC) === #}
+        {% set verfuegbar_wh = ((soc - MIN_SOC) / 100 * BATTERIE_KAPAZITAET) | round(0) %}
+        {% set verfuegbar_wh = [verfuegbar_wh, 0] | max %}
+        
+        {# === BERECHNE DEFIZIT === #}
+        {% set defizit_wh = ns.verbrauch_total - verfuegbar_wh %}
+        
+        {# === BERECHNE ZIEL-SOC === #}
+        {% if defizit_wh > 0 %}
+          {% set zusatz_soc = (defizit_wh / BATTERIE_KAPAZITAET * 100) | round(1) %}
+          {% set ziel_soc = soc + zusatz_soc %}
+        {% else %}
+          {% set ziel_soc = soc %}
+        {% endif %}
+        
+        {# === BILLIGSTROM-BONUS === #}
+        {% if quantile < 0.1 %}
+          {% set ziel_soc = ziel_soc + 25 %}
+        {% elif quantile < 0.2 %}
+          {% set ziel_soc = ziel_soc + 15 %}
+        {% elif quantile < 0.3 %}
+          {% set ziel_soc = ziel_soc + 5 %}
+        {% endif %}
+        
+        {# === GRENZEN ANWENDEN === #}
+        {{ [[ziel_soc | round(0), MIN_SOC] | max, 100] | min | int }}
+      attributes:
+        batterie_kapazitaet_wh: "{{ states('sensor.ezhi_battery_capacity') | float(4800) | int }}"
+        nutzbar_wh: "{{ (states('sensor.ezhi_battery_capacity') | float(4800) * 0.88) | int }}"
+        min_soc_prozent: 12
+        puffer_stunden: 1
+        aktueller_soc: "{{ states('sensor.battery_soc') | int(50) }}"
+        
+        pv_start_stunde: >
+          {% set forecasts = state_attr('sensor.solcast_pv_forecast_prognose_heute', 'detailedHourly') %}
+          {% set ns = namespace(pv_start=8) %}
+          {% if forecasts %}
+            {% for fc in forecasts %}
+              {% if fc.pv_estimate | float(0) > 0.1 %}
+                {% set ns.pv_start = fc.period_start | as_timestamp | timestamp_custom('%H', true) | int %}
+                {% break %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {{ ns.pv_start }}
+        
+        stunden_bis_pv: >
+          {% set hour = now().hour %}
+          {% set forecasts = state_attr('sensor.solcast_pv_forecast_prognose_heute', 'detailedHourly') %}
+          {% set ns = namespace(pv_start=8) %}
+          {% if forecasts %}
+            {% for fc in forecasts %}
+              {% if fc.pv_estimate | float(0) > 0.1 %}
+                {% set ns.pv_start = fc.period_start | as_timestamp | timestamp_custom('%H', true) | int %}
+                {% break %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {% if hour >= ns.pv_start %}
+            {{ (24 - hour) + ns.pv_start }}
+          {% else %}
+            {{ ns.pv_start - hour }}
+          {% endif %}
+        
+        billigstrom_bonus_prozent: >
+          {% set quantile = states('sensor.epex_spot_data_quantile') | float(0.5) %}
+          {% if quantile < 0.1 %}25
+          {% elif quantile < 0.2 %}15
+          {% elif quantile < 0.3 %}5
+          {% else %}0{% endif %}
+        
+        erklaerung: >
+          {% set soc = states('sensor.battery_soc') | int(50) %}
+          {% set ziel = states('sensor.ezhi_spot_netzladen_max_soc') | int(50) %}
+          {% set bonus = state_attr('sensor.ezhi_spot_netzladen_max_soc', 'billigstrom_bonus_prozent') | int(0) %}
+          {% if ziel > soc and bonus > 0 %}
+            Mit Billigstrom-Bonus ({{ bonus }}%) → Ziel {{ ziel }}%
+          {% elif ziel > soc %}
+            Defizit erwartet → Lade auf {{ ziel }}%
+          {% else %}
+            Aktueller SOC {{ soc }}% reicht bis PV
+          {% endif %}
+
+    # =================================================================
+    # STROMPREIS IN CT/KWH (für Dashboard)
+    # =================================================================
+    - name: "Strompreis ct"
+      unique_id: strompreis_ct_kwh
+      unit_of_measurement: "ct/kWh"
+      icon: mdi:currency-eur
+      state: "{{ (states('sensor.epex_spot_data_market_price') | float(0) * 100) | round(2) }}"
+      attributes:
+        euro_kwh: "{{ states('sensor.epex_spot_data_market_price') | float(0) | round(4) }}"
+        rang: "{{ states('sensor.epex_spot_data_rank') | int(0) }}"
+        quantile: "{{ states('sensor.epex_spot_data_quantile') | float(0) | round(2) }}"
+
+    # =================================================================
+    # VORAUSSCHAUENDER LADEPLAN
+    # =================================================================
+    - name: "EZHI Ladeplan"
+      unique_id: ezhi_charge_plan
+      icon: mdi:calendar-clock
+      state: >
+        {% set data = state_attr('sensor.epex_spot_data_market_price', 'data') %}
+        {% if data and data | length > 0 %}
+          {% set now_ts = now() | as_timestamp %}
+          {% set ns = namespace(cheapest_price=999, cheapest_time='') %}
+          {% for item in data %}
+            {% set start_ts = item.start_time | as_timestamp %}
+            {% if start_ts > now_ts and item.price_per_kwh < ns.cheapest_price %}
+              {% set ns.cheapest_price = item.price_per_kwh %}
+              {% set ns.cheapest_time = item.start_time %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.cheapest_time != '' %}
+            {{ (ns.cheapest_time | as_timestamp | timestamp_custom('%H:%M', true)) }}
+          {% else %}
+            Keine Daten
+          {% endif %}
+        {% else %}
+          Keine Daten
+        {% endif %}
+      attributes:
+        aktueller_preis_ct: "{{ (states('sensor.epex_spot_data_market_price') | float(0) * 100) | round(2) }}"
+        
+        billigste_zeit: >
+          {% set data = state_attr('sensor.epex_spot_data_market_price', 'data') %}
+          {% if data %}
+            {% set now_ts = now() | as_timestamp %}
+            {% set ns = namespace(cheapest_price=999, cheapest_time='') %}
+            {% for item in data %}
+              {% set start_ts = item.start_time | as_timestamp %}
+              {% if start_ts > now_ts and item.price_per_kwh < ns.cheapest_price %}
+                {% set ns.cheapest_price = item.price_per_kwh %}
+                {% set ns.cheapest_time = item.start_time %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.cheapest_time | as_timestamp | timestamp_custom('%d.%m %H:%M', true) if ns.cheapest_time else 'N/A' }}
+          {% else %}
+            N/A
+          {% endif %}
+        
+        billigster_preis_ct: >
+          {% set data = state_attr('sensor.epex_spot_data_market_price', 'data') %}
+          {% if data %}
+            {% set now_ts = now() | as_timestamp %}
+            {% set ns = namespace(min_price=999) %}
+            {% for item in data %}
+              {% if item.start_time | as_timestamp > now_ts %}
+                {% if item.price_per_kwh < ns.min_price %}
+                  {% set ns.min_price = item.price_per_kwh %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ (ns.min_price * 100) | round(2) if ns.min_price < 999 else 0 }}
+          {% else %}
+            0
+          {% endif %}
+        
+        teuerste_zeit: >
+          {% set data = state_attr('sensor.epex_spot_data_market_price', 'data') %}
+          {% if data %}
+            {% set now_ts = now() | as_timestamp %}
+            {% set ns = namespace(highest_price=-999, highest_time='') %}
+            {% for item in data %}
+              {% set start_ts = item.start_time | as_timestamp %}
+              {% if start_ts > now_ts and item.price_per_kwh > ns.highest_price %}
+                {% set ns.highest_price = item.price_per_kwh %}
+                {% set ns.highest_time = item.start_time %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.highest_time | as_timestamp | timestamp_custom('%d.%m %H:%M', true) if ns.highest_time else 'N/A' }}
+          {% else %}
+            N/A
+          {% endif %}
+        
+        teuerster_preis_ct: >
+          {% set data = state_attr('sensor.epex_spot_data_market_price', 'data') %}
+          {% if data %}
+            {% set now_ts = now() | as_timestamp %}
+            {% set ns = namespace(max_price=-999) %}
+            {% for item in data %}
+              {% if item.start_time | as_timestamp > now_ts %}
+                {% if item.price_per_kwh > ns.max_price %}
+                  {% set ns.max_price = item.price_per_kwh %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ (ns.max_price * 100) | round(2) if ns.max_price > -999 else 0 }}
+          {% else %}
+            0
+          {% endif %}
+        
+        durchschnitt_ct: >
+          {% set data = state_attr('sensor.epex_spot_data_market_price', 'data') %}
+          {% if data %}
+            {% set now_ts = now() | as_timestamp %}
+            {% set ns = namespace(total=0, count=0) %}
+            {% for item in data %}
+              {% if item.start_time | as_timestamp > now_ts %}
+                {% set ns.total = ns.total + item.price_per_kwh %}
+                {% set ns.count = ns.count + 1 %}
+              {% endif %}
+            {% endfor %}
+            {{ ((ns.total / ns.count) * 100) | round(2) if ns.count > 0 else 0 }}
+          {% else %}
+            0
+          {% endif %}
+        
+        ersparnis_ct_kwh: >
+          {% set aktuell = states('sensor.epex_spot_data_market_price') | float(0) %}
+          {% set data = state_attr('sensor.epex_spot_data_market_price', 'data') %}
+          {% if data %}
+            {% set now_ts = now() | as_timestamp %}
+            {% set ns = namespace(min_price=999) %}
+            {% for item in data %}
+              {% if item.start_time | as_timestamp > now_ts %}
+                {% if item.price_per_kwh < ns.min_price %}
+                  {% set ns.min_price = item.price_per_kwh %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {% set min_price = ns.min_price if ns.min_price < 999 else aktuell %}
+            {{ ((aktuell - min_price) * 100) | round(2) }}
+          {% else %}
+            0
+          {% endif %}
+        
+        batterie_soc: "{{ states('sensor.battery_soc') | int(50) }}"
+        batterie_kapazitaet_wh: "{{ states('sensor.ezhi_battery_capacity') | float(4800) | int }}"
+        batterie_ladekapazitaet_wh: >
+          {% set soc = states('sensor.battery_soc') | int(50) %}
+          {% set cap = states('sensor.ezhi_battery_capacity') | float(4800) %}
+          {{ ((100 - soc) / 100 * cap) | round(0) }}
+        
+        pv_morgen_kwh: "{{ states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) | round(1) }}"
+        
+        empfehlung: >
+          {% set aktuell = states('sensor.epex_spot_data_market_price') | float(0) * 100 %}
+          {% set data = state_attr('sensor.epex_spot_data_market_price', 'data') %}
+          {% set soc = states('sensor.battery_soc') | int(50) %}
+          {% set pv_morgen = states('sensor.solcast_pv_forecast_prognose_morgen') | float(0) %}
+          {% set hour = now().hour %}
+          
+          {% if data %}
+            {% set now_ts = now() | as_timestamp %}
+            {% set ns = namespace(min_price=999, total=0, count=0) %}
+            {% for item in data %}
+              {% if item.start_time | as_timestamp > now_ts %}
+                {% if item.price_per_kwh < ns.min_price %}
+                  {% set ns.min_price = item.price_per_kwh %}
+                {% endif %}
+                {% set ns.total = ns.total + item.price_per_kwh %}
+                {% set ns.count = ns.count + 1 %}
+              {% endif %}
+            {% endfor %}
+            {% set min_price = (ns.min_price * 100) if ns.min_price < 999 else aktuell %}
+            {% set avg_price = ((ns.total / ns.count) * 100) if ns.count > 0 else aktuell %}
+            
+            {% if soc >= 95 %}
+              Batterie voll - kein Laden nötig
+            {% elif aktuell <= min_price * 1.05 %}
+              JETZT LADEN - Preis nahe Minimum ({{ aktuell | round(1) }}ct)
+            {% elif aktuell < avg_price * 0.8 %}
+              Günstig - Laden empfohlen ({{ aktuell | round(1) }}ct)
+            {% elif hour >= 22 or hour < 6 %}
+              {% if pv_morgen > 5 %}
+                Nachts - morgen {{ pv_morgen | round(1) }}kWh PV, wenig laden
+              {% else %}
+                Nachts - wenig PV morgen, Netzladen prüfen
+              {% endif %}
+            {% elif pv_morgen > 5 and soc > 30 %}
+              Warten auf PV morgen ({{ pv_morgen | round(1) }}kWh)
+            {% else %}
+              Warten auf billigere Stunde (Min: {{ min_price | round(1) }}ct)
+            {% endif %}
+          {% else %}
+            Keine Preisdaten verfügbar
+          {% endif %}
+        
+        stunden_bis_billigste: >
+          {% set data = state_attr('sensor.epex_spot_data_market_price', 'data') %}
+          {% if data %}
+            {% set now_ts = now() | as_timestamp %}
+            {% set ns = namespace(cheapest_price=999, cheapest_ts=0) %}
+            {% for item in data %}
+              {% set start_ts = item.start_time | as_timestamp %}
+              {% if start_ts > now_ts and item.price_per_kwh < ns.cheapest_price %}
+                {% set ns.cheapest_price = item.price_per_kwh %}
+                {% set ns.cheapest_ts = start_ts %}
+              {% endif %}
+            {% endfor %}
+            {% if ns.cheapest_ts > 0 %}
+              {{ ((ns.cheapest_ts - now_ts) / 3600) | round(1) }}
+            {% else %}
+              0
+            {% endif %}
+          {% else %}
+            0
+          {% endif %}
+        
+        top5_billigste: >
+          {% set data = state_attr('sensor.epex_spot_data_market_price', 'data') %}
+          {% if data %}
+            {% set now_ts = now() | as_timestamp %}
+            {% set ns = namespace(items=[]) %}
+            {% for item in data %}
+              {% if item.start_time | as_timestamp > now_ts %}
+                {% set ns.items = ns.items + [{'time': item.start_time | as_timestamp | timestamp_custom('%H:%M', true), 'price': (item.price_per_kwh * 100) | round(2)}] %}
+              {% endif %}
+            {% endfor %}
+            {% set sorted_items = ns.items | sort(attribute='price') %}
+            {{ sorted_items[:5] }}
+          {% else %}
+            []
+          {% endif %}

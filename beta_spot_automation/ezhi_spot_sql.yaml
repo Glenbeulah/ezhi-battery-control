@@ -11,7 +11,9 @@
 - name: "EZHI Verbrauchsprofil 7 Tage"
   db_url: sqlite:////config/home-assistant_v2.db
   query: >
-    SELECT json_group_object(hour, ROUND(avg_diff, 0)) as hourly_json
+    SELECT 
+      'Profil OK' as status,
+      json_group_object(hour, ROUND(avg_diff, 0)) as hourly_json
     FROM (
       SELECT 
         strftime('%H', start_ts, 'unixepoch', 'localtime') as hour,
@@ -33,7 +35,7 @@
         AND (state - prev_state) < 5000
       GROUP BY hour
     )
-  column: "hourly_json"
+  column: "status"
 
 # ============================================================================
 # WELCHEN SENSOR VERWENDEN?
@@ -67,12 +69,11 @@
 # ============================================================================
 # ERGEBNIS
 # ============================================================================
-# Der Sensor liefert ein JSON-Objekt im Attribut "hourly_json":
+# Der Sensor hat:
+#   - State: "Profil OK" (kurz, unter 255 Zeichen)
+#   - Attribut "hourly_json": Das vollständige JSON
 #
 # {"00":63,"01":58,"02":59,"07":179,"08":132,"17":259,...}
 #
 # Werte = Durchschnittlicher Verbrauch in Wh pro Stunde (letzte 7 Tage)
-#
-# HINWEIS: Das JSON ist zu lang für den State (max 255 Zeichen),
-# daher steht es nur im Attribut. Das ist korrekt so!
 # ============================================================================

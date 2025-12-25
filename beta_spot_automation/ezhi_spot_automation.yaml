@@ -3,20 +3,40 @@
 # ============================================================================
 # BETA VERSION - Zum Testen!
 #
-# BENÖTIGT:
-# 1. Template Sensoren aus templates_spot.yaml
-# 2. EPEX Spot Integration: https://github.com/mampfes/ha_epex_spot
-# 3. Solcast Integration
-# 4. Basis-Helfer aus v1.0.0
+# WICHTIG: SENSOR-NAMEN ANPASSEN!
+# Diese Sensoren müssen an deine Installation angepasst werden:
 #
-# NEUE HELFER:
-# - input_select.ezhi_modus (Normal / Spot-Optimiert / Manuell)
+#   sensor.sm63_net_power       → Dein Smart Meter Netzleistung (W)
+#   sensor.pv_produktion_gesamt → Deine gesamte PV-Produktion (W)
+#   sensor.battery_soc          → Dein Batterie-SOC (%)
+#   sensor.ezhi_battery_power   → Deine Batterie-Leistung (W)
+#   number.ezhi_on_grid_power   → Dein EZHI On-Grid Setpoint
+#
+# BENÖTIGT:
+# 1. Template Sensoren aus ezhi_spot_templates.yaml
+# 2. SQL Sensor aus ezhi_spot_sql.yaml
+# 3. EPEX Spot Integration: https://github.com/mampfes/ha_epex_spot
+# 4. Solcast Integration: https://github.com/BJReplay/ha-solcast-solar
+# 5. Basis-Helfer aus helpers.yaml
+#
+# CHANGELOG v1.1.0:
+# - NEU: 5 Action-Zustände (pv_laden, netz_laden, entladen, halten, normal)
+# - NEU: Timeout-Schutz mit stabilem Aufwach-Wert (-50W)
+# - NEU: Totband (30W) verhindert Oszillationen
+# - FIX: sensor.battery_soc konsistent verwendet
+# - VERBESSERT: SOC-Schutz-Logik aus v1.0.4
 # ============================================================================
 
 alias: EZHI Batterie-Regelung v1.1.0-beta (Spot)
 description: >
   Intelligente Nulleinspeisung mit Spot-Preis-Optimierung.
-  Nutzt EPEX Spot Rang und PV-Prognose für optimale Lade-/Entlade-Entscheidungen.
+  
+  5 MODI:
+  - pv_laden: PV-Überschuss → Laden auf 100% (kostenlos!)
+  - netz_laden: Günstig → Laden aus Netz auf berechnetes Ziel
+  - entladen: Teuer + PV kommt → Tiefere Entladung erlaubt
+  - halten: Reserve halten (höheres Limit)
+  - normal: EZHI selbst regeln lassen
 
 triggers:
   - entity_id:
@@ -39,13 +59,15 @@ actions:
       aktuell: "{{ states('number.ezhi_on_grid_power') | float(0) }}"
       soc: "{{ states('sensor.battery_soc') | float(0) }}"
       pv_power: "{{ states('sensor.pv_produktion_gesamt') | float(0) }}"
+      wr_istwert: "{{ states('sensor.ezhi_battery_power') | float(0) }}"
+      wr_im_timeout: "{{ (aktuell | abs) > 50 and (wr_istwert | abs) < 10 }}"
       
       # === MODUS & SPOT ===
       modus: "{{ states('input_select.ezhi_modus') }}"
       spot_action: "{{ states('sensor.ezhi_spot_action') }}"
       spot_grund: "{{ states('sensor.ezhi_spot_grund') }}"
-      spot_preis: "{{ states('sensor.epex_spot_data_market_price') | float(0) }}"
-      spot_rank: "{{ states('sensor.epex_spot_data_rank') | int(12) }}"
+      spot_preis: "{{ (states('sensor.epex_spot_data_market_price') | float(0) * 100) | round(1) }}"
+      spot_quantile: "{{ states('sensor.epex_spot_data_quantile') | float(0.5) }}"
       
       # === DYNAMISCHE LIMITS (aus Template Sensoren) ===
       entlade_limit: >
@@ -55,6 +77,7 @@ actions:
           {{ states('input_number.entlade_limit') | float(20) }}
         {% endif %}
       netzladen_max_soc: "{{ states('sensor.ezhi_spot_netzladen_max_soc') | float(60) }}"
+      ladeziel_soc: "{{ state_attr('sensor.ezhi_spot_action', 'ladeziel_soc') | int(80) }}"
       
       # === BASIS-HELFER ===
       lade_limit: "{{ states('input_number.lade_limit') | float(95) }}"
@@ -64,9 +87,13 @@ actions:
       sollwert: -10
       min_inverter: -1200
       max_inverter: 1200
-      soc_schutz_puffer: 40
-      soc_schutz_rampe: 70
+      
+      # === SOC-SCHUTZ PARAMETER (v1.0.4) ===
+      soc_schutz_puffer: 70
+      soc_schutz_rampe: 40
       soc_schutz_min_ladung: 30
+      soc_schutz_totband: 30
+      soc_schutz_aufwach_wert: -50
       
       # === PEAK-ERKENNUNG (wie v1.0.0) ===
       peak_schwelle_niedrig: "{{ states('input_number.peak_schwelle_niedrig') | float(200) }}"
@@ -134,18 +161,28 @@ actions:
           {{ target | round(0) }}
         {% endif %}
       
-      # === SOC-SCHUTZ LADEWERT ===
+      # === SOC-SCHUTZ LADEWERT (v1.0.4 mit Timeout + Totband) ===
       soc_schutz_ladewert: |
-        {% if pv_power > 10 and istwert < -50 %}
+        {# === TIMEOUT-SCHUTZ === #}
+        {% if wr_im_timeout %}
+          {{ soc_schutz_aufwach_wert }}
+        {% elif pv_power > 10 and istwert < -30 %}
+          {# === PV-LADEN MÖGLICH === #}
           {% set ueberschuss = istwert | float %}
-          {% set ziel = ueberschuss + aktuell + soc_schutz_puffer %}
+          {% set ziel = ueberschuss - wr_istwert + soc_schutz_puffer %}
+          
           {% if ziel < min_inverter %}
             {% set ziel = min_inverter %}
           {% endif %}
           {% if ziel > -soc_schutz_min_ladung %}
             {% set ziel = -soc_schutz_min_ladung %}
           {% endif %}
-          {% if aktuell > ziel %}
+          
+          {# === TOTBAND: Nur ändern wenn Differenz > 30W === #}
+          {% set differenz = (aktuell - ziel) | abs %}
+          {% if differenz < soc_schutz_totband %}
+            {{ aktuell | round(0) }}
+          {% elif aktuell > ziel %}
             {% set neuer_wert = aktuell - soc_schutz_rampe %}
             {% if neuer_wert < ziel %}
               {% set neuer_wert = ziel %}
@@ -160,19 +197,18 @@ actions:
   
   - choose:
       # =================================================================
-      # SPOT-MODUS: LADEN (billige Stunden)
+      # SPOT-MODUS: PV-LADEN (PV-Überschuss vorhanden)
       # =================================================================
       - conditions:
           - condition: template
-            value_template: "{{ modus == 'Spot-Optimiert' and spot_action == 'laden' }}"
+            value_template: "{{ modus == 'Spot-Optimiert' and spot_action == 'pv_laden' }}"
           - condition: template
-            value_template: "{{ soc < netzladen_max_soc }}"
+            value_template: "{{ soc < 100 }}"
         sequence:
           - action: system_log.write
             data:
               message: >-
-                [SPOT-LADEN] {{ spot_grund }} | 
-                SOC: {{ soc }}% → max {{ netzladen_max_soc }}%
+                [SPOT-PV] {{ spot_grund }} | SOC: {{ soc }}% → 100%
               level: info
           - action: number.set_value
             target:
@@ -182,18 +218,39 @@ actions:
           - stop: ""
       
       # =================================================================
-      # SPOT-MODUS: LADEN aber SOC erreicht
+      # SPOT-MODUS: NETZ-LADEN (günstige Stunde)
       # =================================================================
       - conditions:
           - condition: template
-            value_template: "{{ modus == 'Spot-Optimiert' and spot_action == 'laden' }}"
+            value_template: "{{ modus == 'Spot-Optimiert' and spot_action == 'netz_laden' }}"
           - condition: template
-            value_template: "{{ soc >= netzladen_max_soc }}"
+            value_template: "{{ soc < ladeziel_soc }}"
         sequence:
           - action: system_log.write
             data:
               message: >-
-                [SPOT] Laden empfohlen, aber SOC {{ soc }}% >= {{ netzladen_max_soc }}%
+                [SPOT-NETZ] {{ spot_grund }} | SOC: {{ soc }}% → {{ ladeziel_soc }}%
+              level: info
+          - action: number.set_value
+            target:
+              entity_id: number.ezhi_on_grid_power
+            data:
+              value: "{{ min_inverter }}"
+          - stop: ""
+      
+      # =================================================================
+      # SPOT-MODUS: NETZ-LADEN aber Ziel erreicht
+      # =================================================================
+      - conditions:
+          - condition: template
+            value_template: "{{ modus == 'Spot-Optimiert' and spot_action == 'netz_laden' }}"
+          - condition: template
+            value_template: "{{ soc >= ladeziel_soc }}"
+        sequence:
+          - action: system_log.write
+            data:
+              message: >-
+                [SPOT] Laden empfohlen, aber SOC {{ soc }}% >= Ziel {{ ladeziel_soc }}%
               level: info
           # Weiter mit normaler Regelung
       
@@ -209,8 +266,7 @@ actions:
           - action: system_log.write
             data:
               message: >-
-                [SPOT-HOLD] {{ spot_grund }} | 
-                SOC {{ soc }}% am Limit {{ entlade_limit }}%
+                [SPOT-HOLD] {{ spot_grund }} | SOC {{ soc }}% am Limit {{ entlade_limit }}%
               level: info
           - action: number.set_value
             target:
@@ -220,7 +276,7 @@ actions:
           - stop: ""
       
       # =================================================================
-      # SPOT-MODUS: ENTLADEN (teure Stunden) - Nur loggen
+      # SPOT-MODUS: ENTLADEN (teure Stunde)
       # =================================================================
       - conditions:
           - condition: template
@@ -231,8 +287,7 @@ actions:
           - action: system_log.write
             data:
               message: >-
-                [SPOT-ENTLADEN] {{ spot_grund }} | 
-                Limit: {{ entlade_limit }}% (reduziert)
+                [SPOT-ENTLADEN] {{ spot_grund }} | Limit: {{ entlade_limit }}% (dynamisch)
               level: info
           # Weiter mit normaler Regelung (tieferes Limit aktiv)
       
@@ -247,6 +302,7 @@ actions:
             data:
               message: >-
                 [SOC-SCHUTZ] {{ soc }}% ≤ {{ entlade_limit }}%
+                {% if wr_im_timeout %}[TIMEOUT]{% endif %}
                 {% if modus == 'Spot-Optimiert' %} (Spot: {{ spot_action }}){% endif %}
               level: info
           - action: number.set_value
@@ -273,7 +329,7 @@ actions:
         data:
           message: >-
             [REGELUNG] {{ modus }}
-            {% if modus == 'Spot-Optimiert' %}| Spot: {{ spot_action }} ({{ spot_preis | round(1) }}ct, Rang {{ spot_rank }}){% endif %}
+            {% if modus == 'Spot-Optimiert' %}| Spot: {{ spot_action }} ({{ spot_preis }}ct, Q{{ (spot_quantile*100)|round(0) }}%){% endif %}
             | ist={{ istwert }}W → neu={{ new_value }}W
           level: info
       

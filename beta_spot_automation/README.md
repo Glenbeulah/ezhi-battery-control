@@ -43,6 +43,18 @@ Automation deaktiviert:
 | `ezhi_spot_automation.yaml` | Automation | Import via UI |
 | `ezhi_spot_dashboard.yaml` | Dashboard | Raw-Editor |
 
+## Sensor-Mapping (WICHTIG!)
+
+Die Automation verwendet diese Sensoren - **passe sie an deine Installation an**:
+
+| Sensor in der Automation | Dein Sensor | Beschreibung |
+|--------------------------|-------------|---------------|
+| `sensor.sm63_net_power` | z.B. `sensor.dein_smartmeter_power` | Netzleistung in W (positiv=Bezug) |
+| `sensor.pv_produktion_gesamt` | z.B. `sensor.dein_pv_power` | Gesamt-PV-Leistung in W |
+| `sensor.battery_soc` | meist gleich | Batterie-SOC in % |
+| `sensor.ezhi_battery_power` | meist gleich | Batterie-Leistung in W |
+| `number.ezhi_on_grid_power` | meist gleich | EZHI On-Grid Setpoint |
+
 ## Architektur
 
 ```
@@ -97,10 +109,11 @@ Automation deaktiviert:
 │  - "Manuell"        → Keine Aktion                             │
 │                                                                 │
 │  Bei Spot-Optimiert liest sensor.ezhi_spot_action:             │
-│  - "laden"    → Netzladen mit max. Leistung                    │
-│  - "entladen" → Tieferes Entlade-Limit                         │
-│  - "halten"   → Batterie schonen                               │
-│  - "normal"   → Standard-Regelung                              │
+│  - "pv_laden"   → PV-Überschuss auf 100% (kostenlos!)           │
+│  - "netz_laden" → Günstig: Netzladen auf berechnetes Ziel       │
+│  - "entladen"   → Teuer + PV kommt: Tieferes Entlade-Limit      │
+│  - "halten"     → Reserve halten (höheres Limit)               │
+│  - "normal"     → EZHI selbst regeln lassen                              │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -216,28 +229,28 @@ Diese Formel nutzt **nur kumulative Wh-Zähler** - keine Riemann-Summe, robust g
 | `sensor.ezhi_erwarteter_verbrauch_stunde` | Verbrauch jetzt (Wh) |
 | `sensor.ezhi_pv_prognose_4h` | PV nächste 4 Stunden (Wh) |
 | `sensor.ezhi_energie_bilanz_4h` | PV 4h minus Verbrauch 4h (Wh) |
-| `sensor.ezhi_spot_action` | Empfehlung: laden/entladen/halten/normal |
+| `sensor.ezhi_spot_action` | 5 Zustände: pv_laden/netz_laden/entladen/halten/normal |
 | `sensor.ezhi_spot_grund` | Begründung als Text |
 | `sensor.ezhi_spot_score` | -100 bis +100 |
 | `sensor.ezhi_dynamisches_entlade_limit` | Angepasstes Limit (%) |
 | `sensor.ezhi_spot_netzladen_max_soc` | Max SOC fürs Netzladen (%) |
 
-### Entscheidungsbaum
+### Entscheidungsbaum (5 Zustände)
 
 ```
-PREIS BILLIG (Rang ≤4 oder Quantil <0.2)?
-├── JA: Bilanz 4h > +2000 Wh?
-│       ├── JA: → NORMAL (genug PV in nächsten 4h)
-│       └── NEIN: → LADEN (aus Netz!)
-│
-PREIS TEUER (Rang ≥21 oder Quantil >0.8)?
-├── JA: → ENTLADEN (Batterie nutzen)
-│
-SONST (mittlerer Preis):
-├── Bilanz 4h > +1000 Wh? → HALTEN (PV kommt bald)
-├── Nach 18 Uhr UND morgen >5kWh PV? → HALTEN (morgen laden)
-├── Bilanz 4h < -500 Wh? → NORMAL (Defizit decken)
-└── Sonst → NORMAL
+1. SOC-GRENZEN PRÜFEN:
+   └── SOC ≤15%? → pv_laden (wenn PV) / netz_laden (wenn billig) / halten
+   └── SOC ≥90%? → pv_laden (wenn PV < 100%) / entladen (wenn teuer+PV) / normal
+
+2. PV AKTIV? (PV 4h > 100W + Bilanz positiv)
+   └── JA: → PV_LADEN auf 100% (kostenlos!)
+
+3. KEIN PV - PREISBASIERT:
+   └── Sehr billig (Q<0.2) + Defizit → NETZ_LADEN
+   └── Billig (Q<0.3) + großes Defizit → NETZ_LADEN
+   └── Teuer (Q>0.7) + SOC>30% + PV kommt → ENTLADEN
+   └── Teuer aber wenig PV → HALTEN
+   └── Sonst → NORMAL
 ```
 
 ## Hinweise zum SQL-Sensor

@@ -1,5 +1,5 @@
 # ============================================================================
-# EZHI Batterie-Regelung Blueprint v1.0.0 - Vollversion
+# EZHI Batterie-Regelung Blueprint v1.0.4 - Vollversion
 # ============================================================================
 # Intelligente Batterie-Steuerung für APsystems EZHI Hybrid-Wechselrichter
 # Mit Logging und Notifications
@@ -8,10 +8,15 @@
 # 1. Diese Datei nach /config/blueprints/automation/ezhi/ kopieren
 # 2. In Home Assistant: Einstellungen → Automatisierungen → Blueprint erstellen
 # 3. Die benötigten Entities auswählen
+#
+# CHANGELOG v1.0.4:
+# - FIX: Bei WR-Timeout stabilen Aufwach-Wert (-50W) statt 0W setzen
+# - NEU: Totband (30W) verhindert Oszillationen bei kleinen Änderungen
+# - VERBESSERT: Brutto-Überschuss-Berechnung berücksichtigt aktuelle WR-Leistung
 # ============================================================================
 
 blueprint:
-  name: EZHI Batterie-Regelung v1.0.0
+  name: EZHI Batterie-Regelung v1.0.4
   description: |
     Intelligente Nulleinspeisung mit Batterie-Strategie für APsystems EZHI.
     
@@ -21,6 +26,11 @@ blueprint:
     - SOC-Schutz mit PV-Laden (kein Netzladen!)
     - Solarprognose-basierte Entladetiefe
     - System-Logging und Notifications
+    
+    **v1.0.4 Änderungen:**
+    - Bei WR-Timeout: stabiler Aufwach-Wert (-50W) statt 0W
+    - Totband (30W) verhindert Oszillationen
+    - Verbesserte Brutto-Überschuss-Berechnung
     
     **Voraussetzungen:**
     - APsystems EZHI Integration (kamilkosek/EZHI)
@@ -279,22 +289,36 @@ variables:
   min_inverter: "{{ min_inv }}"
   max_inverter: "{{ max_inv }}"
   
-  # SOC-Schutz Parameter
-  soc_schutz_puffer: 40
-  soc_schutz_rampe: 70
+  # SOC-Schutz Parameter (v1.0.4)
+  soc_schutz_puffer: 70
+  soc_schutz_rampe: 40
   soc_schutz_min_ladung: 30
+  soc_schutz_totband: 30
+  soc_schutz_aufwach_wert: -50
   
+  # SOC-Schutz Ladewert-Berechnung (v1.0.4)
   soc_schutz_ladewert: |
-    {% if pv_power > 10 and istwert < -50 %}
+    {# === TIMEOUT-SCHUTZ (v1.0.4) === #}
+    {% if wr_im_timeout %}
+      {{ soc_schutz_aufwach_wert }}
+    {% elif pv_power > 10 and istwert < -30 %}
+      {# === PV-LADEN MÖGLICH === #}
       {% set ueberschuss = istwert | float %}
-      {% set ziel = ueberschuss + aktuell + soc_schutz_puffer %}
+      {# Brutto-Überschuss: Netz + was WR bereits lädt #}
+      {% set ziel = ueberschuss - wr_istwert + soc_schutz_puffer %}
+      
       {% if ziel < min_inverter %}
         {% set ziel = min_inverter %}
       {% endif %}
       {% if ziel > -soc_schutz_min_ladung %}
         {% set ziel = -soc_schutz_min_ladung %}
       {% endif %}
-      {% if aktuell > ziel %}
+      
+      {# === TOTBAND: Nur ändern wenn Differenz > 30W === #}
+      {% set differenz = (aktuell - ziel) | abs %}
+      {% if differenz < soc_schutz_totband %}
+        {{ aktuell | round(0) }}
+      {% elif aktuell > ziel %}
         {% set neuer_wert = aktuell - soc_schutz_rampe %}
         {% if neuer_wert < ziel %}
           {% set neuer_wert = ziel %}
@@ -391,22 +415,18 @@ action:
             data:
               message: >-
                 [SOC-SCHUTZ] {{ soc }}% ≤ {{ entlade_limit }}% – 
-                {% if pv_power > 10 and istwert < -50 %}
-                  PV-Laden: Überschuss={{ (istwert * -1) | round(0) }}W, 
-                  Ziel={{ (soc_schutz_ladewert * -1) | round(0) }}W, 
-                  WR: {{ aktuell | round(0) }}W → {{ soc_schutz_ladewert }}W
-                  {% if wr_im_timeout %} [TIMEOUT]{% endif %}
-                {% elif pv_power > 10 %}
-                  Warte auf Überschuss (PV: {{ pv_power | round(0) }}W)
-                {% else %}
-                  Kein PV, WR → 0W
-                {% endif %}
+                {% if wr_im_timeout %}[TIMEOUT] WR nicht aktiv, Aufwach-Wert → {{ soc_schutz_aufwach_wert }}W
+                {% elif pv_power > 10 and istwert < -30 %}PV-Laden: Überschuss={{ (istwert * -1) | round(0) }}W, 
+                Ziel={{ (soc_schutz_ladewert * -1) | round(0) }}W (Puffer={{ soc_schutz_puffer }}W, Totband={{ soc_schutz_totband }}W), 
+                WR: {{ aktuell | round(0) }}W → {{ soc_schutz_ladewert }}W
+                {% elif pv_power > 10 %}Warte auf Überschuss (PV: {{ pv_power | round(0) }}W)
+                {% else %}Kein PV, WR → 0W{% endif %}
               level: info
           
-          # PV-LADEN NOTIFICATION (unabhängig!)
+          # PV-LADEN NOTIFICATION
           - if:
               - condition: template
-                value_template: "{{ pv_power > 10 and istwert < -50 }}"
+                value_template: "{{ pv_power > 10 and istwert < -30 and not wr_im_timeout }}"
               - condition: template
                 value_template: "{{ is_state(pv_laden_notif_input, 'off') }}"
             then:
@@ -420,10 +440,10 @@ action:
                 target:
                   entity_id: !input pv_laden_notification_helper
           
-          # SOC-SCHUTZ NOTIFICATION (kein PV)
+          # SOC-SCHUTZ NOTIFICATION (kein PV oder Timeout)
           - if:
               - condition: template
-                value_template: "{{ not (pv_power > 10 and istwert < -50) }}"
+                value_template: "{{ not (pv_power > 10 and istwert < -30) or wr_im_timeout }}"
               - condition: template
                 value_template: "{{ is_state(discharge_notif_input, 'off') }}"
             then:
@@ -436,7 +456,6 @@ action:
               - service: input_boolean.turn_on
                 target:
                   entity_id: !input discharge_notification_helper
-              # Reset PV-Notification damit sie wieder kommt wenn PV startet
               - service: input_boolean.turn_off
                 target:
                   entity_id: !input pv_laden_notification_helper
@@ -450,7 +469,7 @@ action:
     
     # NORMALE REGELUNG
     default:
-      # Reset BEIDE Notification-Booleans wenn SOC > Limit
+      # Reset BEIDE Notification-Booleans
       - if:
           - condition: template
             value_template: "{{ soc > entlade_limit }}"
