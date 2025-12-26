@@ -1,4 +1,4 @@
-# EZHI Batterie-Regelung v1.1.0-beta - Spot-Preis-Steuerung
+# EZHI Batterie-Regelung v1.1.1-beta - Spot-Preis-Steuerung
 
 ## ⚠️ BETA VERSION - Zum Testen!
 
@@ -6,6 +6,32 @@ Diese Version erweitert die Basisautomation um:
 - **Dynamische Stromtarife** (EPEX Spot)
 - **PV-Prognose** (Solcast - nächste 4 Stunden)
 - **Verbrauchsprognose** (letzte 7 Tage, stündlich)
+
+## 📋 Voraussetzung: Dynamischer Stromtarif
+
+> **WICHTIG:** Diese Spot-Steuerung ist ausschließlich für **dynamische Stromtarife OHNE Direktvermarktung** konzipiert (z.B. Tibber, aWATTar, Ostrom, 1Komma5°).
+
+### Was bedeutet das?
+
+| Tarifmodell | Netzladen bei billig | Entladen für Eigenverbrauch | Entladen ins Netz | Unterstützt? |
+|-------------|---------------------|----------------------------|-------------------|---------------|
+| **Fester Tarif + feste Vergütung** | ❌ sinnlos | ✅ normal | ❌ sinnlos | ❌ NEIN |
+| **Dynamischer Tarif + feste Vergütung** | ✅ spart Geld | ✅ spart teuren Bezug | ❌ sinnlos | ✅ **JA** |
+| **Direktvermarktung** | ✅ | ✅ | ✅ Gewinn möglich | ❌ NEIN* |
+
+*Direktvermarktung erfordert zusätzliche Logik (aktive Netzeinspeisung bei hohen Preisen, Negativpreis-Handling), die hier nicht implementiert ist.
+
+### So funktioniert die Spot-Logik:
+
+```
+"Entladen" = Eigenverbrauch aus Batterie statt teurer Netzbezug
+             (Nulleinspeisung bleibt aktiv!)
+
+"Entladen" ≠ Aktiv ins Netz einspeisen für Gewinn
+             (das bringt bei fester Vergütung nichts)
+```
+
+**Bei festem Stromtarif:** Nutze den Modus "Normal" - die Spot-Preise sind für dich irrelevant.
 
 ## Betriebsmodi
 
@@ -20,11 +46,12 @@ Die Standard-Regelung aus v1.0.0:
 
 ### 🟢 Spot-Optimiert
 Volle Spot-Preis-Steuerung:
-- **Billige Stunden (Rang 1-4):** Batterie aus Netz laden
-- **Teure Stunden (Rang 21-24):** Batterie entladen, tieferes Limit
-- **Mittlere Preise:** Normal regeln oder halten (je nach PV-Prognose)
+- **Billige Stunden (Quantil < 0.3):** Batterie aus Netz laden bis Ziel-SOC
+- **Teure Stunden (Quantil > 0.7):** Tieferes Entlade-Limit, Eigenverbrauch aus Batterie
+- **Mittlere Preise:** Normale Regelung
+- **Ziel-SOC für Netzladen:** Berechnet aus Verbrauchsprognose + PV-Prognose
 - Berücksichtigt PV-Forecast und Verbrauchsprofil
-- Ideal für: Dynamische Tarife (Tibber, aWATTar, EPEX)
+- Ideal für: Dynamische Tarife (Tibber, aWATTar, Ostrom, 1Komma5°)
 
 ### 🔴 Manuell
 Automation deaktiviert:
@@ -237,21 +264,34 @@ Diese Formel nutzt **nur kumulative Wh-Zähler** - keine Riemann-Summe, robust g
 
 ### Entscheidungsbaum (5 Zustände)
 
+**WICHTIG v1.1.1:** Nur `netz_laden` und `entladen` greifen aktiv ein!
+`pv_laden` und `halten` sind reine Anzeige-Status.
+
 ```
 1. SOC-GRENZEN PRÜFEN:
    └── SOC ≤15%? → pv_laden (wenn PV) / netz_laden (wenn billig) / halten
    └── SOC ≥90%? → pv_laden (wenn PV < 100%) / entladen (wenn teuer+PV) / normal
 
 2. PV AKTIV? (PV 4h > 100W + Bilanz positiv)
-   └── JA: → PV_LADEN auf 100% (kostenlos!)
+   └── JA: → PV_LADEN (Anzeige) - Normale Regelung lädt mit Überschuss
 
 3. KEIN PV - PREISBASIERT:
-   └── Sehr billig (Q<0.2) + Defizit → NETZ_LADEN
-   └── Billig (Q<0.3) + großes Defizit → NETZ_LADEN
-   └── Teuer (Q>0.7) + SOC>30% + PV kommt → ENTLADEN
-   └── Teuer aber wenig PV → HALTEN
+   └── Sehr billig (Q<0.2) + Defizit → NETZ_LADEN (aktiv -1200W)
+   └── Billig (Q<0.3) + großes Defizit → NETZ_LADEN (aktiv -1200W)
+   └── Teuer (Q>0.7) + SOC>30% + PV kommt → ENTLADEN (tieferes Limit)
+   └── Teuer aber wenig PV/Puffer → HALTEN (Anzeige) - Normale Regelung
    └── Sonst → NORMAL
 ```
+
+### Was passiert bei jedem Zustand?
+
+| Zustand | Aktiver Eingriff | Was passiert |
+|---------|------------------|---------------|
+| `pv_laden` | ❌ Nein | Anzeige: "PV lädt" - Normale Regelung lädt mit Überschuss |
+| `netz_laden` | ✅ **Ja** | Aktiv -1200W bis Ziel-SOC (günstig aus Netz laden) |
+| `entladen` | ✅ Limit | Entlade-Limit wird gesenkt, normale Regelung läuft |
+| `halten` | ❌ Nein | Anzeige: "Am Limit" - Normale Regelung bis MIN_SOC |
+| `normal` | ❌ Nein | Standard-Nulleinspeisung ohne Spot-Optimierung |
 
 ## Hinweise zum SQL-Sensor
 

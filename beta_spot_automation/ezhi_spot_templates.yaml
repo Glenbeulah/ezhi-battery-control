@@ -527,16 +527,15 @@
         {% set hour = now().hour %}
         {% set MIN_SOC = 13 %}
         
-        {# Nachts ohne PV morgen: Höheres Limit (Reserve halten) #}
-        {% if hour >= 22 or hour < 6 %}
-          {% if pv_morgen < 3 %}
-            {{ [basis + 10, 40] | min }}
-          {% else %}
-            {{ basis }}
-          {% endif %}
+        {# ================================================================= #}
+        {# v1.1.1: Limit wird NUR bei 'entladen' gesenkt!                    #}
+        {# Bei allen anderen Zuständen (pv_laden, netz_laden, halten,        #}
+        {# normal) gilt das Basis-Limit.                                     #}
+        {# GRUND: Limit erhöhen bei 'halten' führte zu teurem Netzbezug!    #}
+        {# ================================================================= #}
         
         {# Entladen-Empfehlung: Tieferes Limit erlaubt, aber nie unter MIN_SOC #}
-        {% elif action == 'entladen' %}
+        {% if action == 'entladen' %}
           {% if pv_morgen > 5 %}
             {{ [basis - 10, MIN_SOC] | max }}
           {% elif bilanz > 0 %}
@@ -545,11 +544,7 @@
             {{ [basis - 5, MIN_SOC] | max }}
           {% endif %}
         
-        {# Halten-Empfehlung: Höheres Limit #}
-        {% elif action == 'halten' %}
-          {{ [basis + 15, 50] | min }}
-        
-        {# Sonst: Basis (aber nie unter MIN_SOC) #}
+        {# Alle anderen Zustände: Basis-Limit (nie unter MIN_SOC) #}
         {% else %}
           {{ [basis, MIN_SOC] | max }}
         {% endif %}

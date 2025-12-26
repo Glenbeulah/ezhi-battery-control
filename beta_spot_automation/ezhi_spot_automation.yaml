@@ -1,7 +1,10 @@
 # ============================================================================
-# EZHI Batterie-Regelung v1.1.0-beta - MIT SPOT-PREIS-STEUERUNG
+# EZHI Batterie-Regelung v1.1.1-beta - MIT SPOT-PREIS-STEUERUNG
 # ============================================================================
 # BETA VERSION - Zum Testen!
+#
+# WICHTIG: NUR FÜR DYNAMISCHE STROMTARIFE OHNE DIREKTVERMARKTUNG!
+# (z.B. Tibber, aWATTar, Ostrom, 1Komma5°)
 #
 # WICHTIG: SENSOR-NAMEN ANPASSEN!
 # Diese Sensoren müssen an deine Installation angepasst werden:
@@ -19,24 +22,38 @@
 # 4. Solcast Integration: https://github.com/BJReplay/ha-solcast-solar
 # 5. Basis-Helfer aus helpers.yaml
 #
+# CHANGELOG v1.1.1:
+# - FIX: pv_laden greift nicht mehr aktiv ein (Bug: lud aus Netz statt PV!)
+# - FIX: halten erhöht Limit nicht mehr (führte zu teurem Netzbezug)
+# - KLARSTELLUNG: pv_laden und halten sind nur noch Anzeige-Status
+# - Normale Regelung übernimmt bei pv_laden und halten
+#
 # CHANGELOG v1.1.0:
 # - NEU: 5 Action-Zustände (pv_laden, netz_laden, entladen, halten, normal)
 # - NEU: Timeout-Schutz mit stabilem Aufwach-Wert (-50W)
 # - NEU: Totband (30W) verhindert Oszillationen
-# - FIX: sensor.battery_soc konsistent verwendet
 # - VERBESSERT: SOC-Schutz-Logik aus v1.0.4
+#
+# DIE 5 ZUSTÄNDE:
+# - pv_laden:   Anzeige: PV-Überschuss lädt Batterie (normale Regelung aktiv)
+# - netz_laden: AKTIV: Günstig → Laden aus Netz auf berechnetes Ziel
+# - entladen:   Anzeige + tieferes Limit: Teuer → Eigenverbrauch aus Batterie
+# - halten:     Anzeige: Batterie am Limit, wartet auf Laden (normale Regelung)
+# - normal:     Standard-Nulleinspeisungs-Regelung
 # ============================================================================
 
-alias: EZHI Batterie-Regelung v1.1.0-beta (Spot)
+alias: EZHI Batterie-Regelung v1.1.1-beta (Spot)
 description: >
   Intelligente Nulleinspeisung mit Spot-Preis-Optimierung.
   
-  5 MODI:
-  - pv_laden: PV-Überschuss → Laden auf 100% (kostenlos!)
-  - netz_laden: Günstig → Laden aus Netz auf berechnetes Ziel
-  - entladen: Teuer + PV kommt → Tiefere Entladung erlaubt
-  - halten: Reserve halten (höheres Limit)
-  - normal: EZHI selbst regeln lassen
+  AKTIVE EINGRIFFE:
+  - netz_laden: Günstige Stunde → Aktiv aus Netz laden bis Ziel-SOC
+  - entladen: Teure Stunde → Tieferes Entlade-Limit erlaubt
+  
+  NUR ANZEIGE (normale Regelung läuft):
+  - pv_laden: PV-Überschuss wird geladen
+  - halten: Batterie am Limit, wartet auf Lade-Gelegenheit
+  - normal: Keine Spot-Optimierung aktiv
 
 triggers:
   - entity_id:
@@ -70,8 +87,9 @@ actions:
       spot_quantile: "{{ states('sensor.epex_spot_data_quantile') | float(0.5) }}"
       
       # === DYNAMISCHE LIMITS (aus Template Sensoren) ===
+      # Nur bei entladen wird das Limit gesenkt, sonst Basis-Limit
       entlade_limit: >
-        {% if modus == 'Spot-Optimiert' %}
+        {% if modus == 'Spot-Optimiert' and spot_action == 'entladen' %}
           {{ states('sensor.ezhi_dynamisches_entlade_limit') | float(20) }}
         {% else %}
           {{ states('input_number.entlade_limit') | float(20) }}
@@ -197,28 +215,7 @@ actions:
   
   - choose:
       # =================================================================
-      # SPOT-MODUS: PV-LADEN (PV-Überschuss vorhanden)
-      # =================================================================
-      - conditions:
-          - condition: template
-            value_template: "{{ modus == 'Spot-Optimiert' and spot_action == 'pv_laden' }}"
-          - condition: template
-            value_template: "{{ soc < 100 }}"
-        sequence:
-          - action: system_log.write
-            data:
-              message: >-
-                [SPOT-PV] {{ spot_grund }} | SOC: {{ soc }}% → 100%
-              level: info
-          - action: number.set_value
-            target:
-              entity_id: number.ezhi_on_grid_power
-            data:
-              value: "{{ min_inverter }}"
-          - stop: ""
-      
-      # =================================================================
-      # SPOT-MODUS: NETZ-LADEN (günstige Stunde)
+      # SPOT-MODUS: NETZ-LADEN (günstige Stunde) - AKTIVER EINGRIFF
       # =================================================================
       - conditions:
           - condition: template
@@ -239,7 +236,7 @@ actions:
           - stop: ""
       
       # =================================================================
-      # SPOT-MODUS: NETZ-LADEN aber Ziel erreicht
+      # SPOT-MODUS: NETZ-LADEN aber Ziel erreicht → normale Regelung
       # =================================================================
       - conditions:
           - condition: template
@@ -250,33 +247,13 @@ actions:
           - action: system_log.write
             data:
               message: >-
-                [SPOT] Laden empfohlen, aber SOC {{ soc }}% >= Ziel {{ ladeziel_soc }}%
+                [SPOT] Laden empfohlen, aber SOC {{ soc }}% >= Ziel {{ ladeziel_soc }}% → normale Regelung
               level: info
-          # Weiter mit normaler Regelung
+          # Weiter mit normaler Regelung (kein stop!)
       
       # =================================================================
-      # SPOT-MODUS: HALTEN (Batterie schonen)
-      # =================================================================
-      - conditions:
-          - condition: template
-            value_template: "{{ modus == 'Spot-Optimiert' and spot_action == 'halten' }}"
-          - condition: template
-            value_template: "{{ soc <= entlade_limit }}"
-        sequence:
-          - action: system_log.write
-            data:
-              message: >-
-                [SPOT-HOLD] {{ spot_grund }} | SOC {{ soc }}% am Limit {{ entlade_limit }}%
-              level: info
-          - action: number.set_value
-            target:
-              entity_id: number.ezhi_on_grid_power
-            data:
-              value: "{{ soc_schutz_ladewert }}"
-          - stop: ""
-      
-      # =================================================================
-      # SPOT-MODUS: ENTLADEN (teure Stunde)
+      # SPOT-MODUS: ENTLADEN (teure Stunde) - NUR LOGGING
+      # Tieferes Limit ist bereits in Variable entlade_limit gesetzt
       # =================================================================
       - conditions:
           - condition: template
@@ -287,12 +264,13 @@ actions:
           - action: system_log.write
             data:
               message: >-
-                [SPOT-ENTLADEN] {{ spot_grund }} | Limit: {{ entlade_limit }}% (dynamisch)
+                [SPOT-ENTLADEN] {{ spot_grund }} | Limit: {{ entlade_limit }}% (dynamisch tiefer)
               level: info
-          # Weiter mit normaler Regelung (tieferes Limit aktiv)
+          # Weiter mit normaler Regelung (tieferes Limit aktiv, kein stop!)
       
       # =================================================================
       # SOC-SCHUTZ (mit dynamischem Limit)
+      # Greift bei pv_laden, halten, normal wenn SOC am Limit
       # =================================================================
       - conditions:
           - condition: template
@@ -314,6 +292,7 @@ actions:
     
     # =================================================================
     # NORMALE REGELUNG
+    # Läuft bei: pv_laden, halten, normal, entladen (mit tieferem Limit)
     # =================================================================
     default:
       - condition: template
