@@ -182,10 +182,16 @@ views:
           - entity: sensor.ezhi_roi_standby_kosten
             name: Standby-Kosten
             icon: mdi:power-sleep
+          - entity: sensor.ezhi_roi_verlustkosten
+            name: Verlustkosten (AC)
+            icon: mdi:flash-alert
           - type: divider
           - entity: sensor.ezhi_roi_ersparnis_netto
-            name: '= Netto-Ersparnis'
+            name: '= Netto-Ersparnis (ohne Verluste)'
             icon: mdi:piggy-bank
+          - entity: sensor.ezhi_roi_ersparnis_netto_korrigiert
+            name: '= Netto-Ersparnis (mit Verlusten)'
+            icon: mdi:piggy-bank-outline
       - type: markdown
         content: '### ⚡ Durchsatz & Wirkungsgrad'
       - type: horizontal-stack
@@ -384,7 +390,11 @@ views:
           - entity: sensor.ezhi_roi_ersparnis_brutto
           - entity: sensor.ezhi_roi_entgangene_einspeisung
           - entity: sensor.ezhi_roi_standby_kosten
+          - entity: sensor.ezhi_roi_verlustkosten
+          - entity: sensor.ezhi_roi_verluste_integriert
+          - entity: sensor.ezhi_roi_verluste_geschaetzt
           - entity: sensor.ezhi_roi_ersparnis_netto
+          - entity: sensor.ezhi_roi_ersparnis_netto_korrigiert
           - entity: sensor.ezhi_roi_amortisation_prozent
           - entity: sensor.ezhi_roi_tage_bis_breakeven
           - entity: sensor.ezhi_roi_status
