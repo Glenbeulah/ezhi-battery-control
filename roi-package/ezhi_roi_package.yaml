@@ -1,0 +1,598 @@
+# ============================================================================
+# EZHI ROI-Analyse Package
+# ============================================================================
+# Berechnet Wirtschaftlichkeit und Amortisation deiner EZHI Batterie.
+#
+# INSTALLATION:
+#   1. Kopiere diese Datei nach /config/packages/ezhi_roi_package.yaml
+#   2. Stelle sicher, dass packages in configuration.yaml aktiviert ist:
+#      homeassistant:
+#        packages: !include_dir_named packages
+#   3. Passe die Werte unter "ANPASSUNG ERFORDERLICH" an dein System an
+#   4. Home Assistant neu starten
+#
+# VORAUSSETZUNGEN:
+#   - EZHI Integration (https://github.com/kamilkosek/EZHI)
+#     Benötigte Sensoren:
+#       - sensor.ezhi_battery_total_charge_energy   (kWh, Gesamtladung)
+#       - sensor.ezhi_battery_total_discharge_energy (kWh, Gesamtentladung)
+#       - sensor.ezhi_battery_power                  (W, aktuelle Batterieleistung)
+#
+# HINWEIS: Falls deine Sensoren anders heißen, suche & ersetze:
+#   sensor.ezhi_battery_total_charge_energy    → dein Lade-Zähler
+#   sensor.ezhi_battery_total_discharge_energy → dein Entlade-Zähler
+#   sensor.ezhi_battery_power                  → deine Batterie-Leistung (W)
+# ============================================================================
+
+
+# ============================================================================
+# HELFER (Input Numbers) - Konfigurierbar über UI
+# ============================================================================
+
+input_number:
+  # Gesamtinvestition für die Batterie (inkl. Zubehör/Versand)
+  ezhi_roi_anschaffungskosten:
+    name: "EZHI ROI Anschaffungskosten"
+    min: 0
+    max: 10000
+    step: 1
+    initial: 1000          # ◀ ANPASSUNG: Dein Kaufpreis in € (wird nur beim ersten Start gesetzt)
+    unit_of_measurement: "€"
+    icon: mdi:cash
+    mode: box
+
+  # Einspeisevergütung die du OHNE Batterie bekommen würdest
+  ezhi_roi_einspeiseverguetung:
+    name: "EZHI ROI Einspeisevergütung"
+    min: 0
+    max: 20
+    step: 0.1
+    initial: 8.0            # ◀ ANPASSUNG: Deine Vergütung in ct/kWh (wird nur beim ersten Start gesetzt)
+    unit_of_measurement: "ct/kWh"
+    icon: mdi:solar-power
+    mode: box
+
+  # Aktueller Strompreis (Netto-Bezugspreis)
+  ezhi_roi_strompreis:
+    name: "EZHI ROI Strompreis"
+    min: 0
+    max: 100
+    step: 0.1
+    initial: 30             # ◀ ANPASSUNG: Dein Strompreis in ct/kWh (wird nur beim ersten Start gesetzt)
+    unit_of_measurement: "ct/kWh"
+    icon: mdi:flash
+    mode: box
+
+# Inbetriebnahme-Datum der Batterie
+input_datetime:
+  ezhi_roi_start_datum:
+    name: "EZHI ROI Inbetriebnahme"
+    has_date: true
+    has_time: false
+    icon: mdi:calendar-start
+
+
+# ============================================================================
+# TEMPLATE-SENSOREN - ROI-Berechnung
+# ============================================================================
+
+# ============================================================================
+# RIEMANN-SUMMEN-INTEGRATION für Live-Verlust-Tracking
+# ============================================================================
+# Integriert die geschätzte Verlustleistung (W) über die Zeit → kWh
+# Dadurch wird der Wirkungsgrad bei jeder Leistungsstufe korrekt erfasst,
+# statt feste Durchschnittswerte (0.85/0.95) zu verwenden.
+# ============================================================================
+sensor:
+  - platform: integration
+    source: sensor.ezhi_roi_verlust_power_gesamt
+    name: "EZHI ROI Verluste Integriert"
+    unique_id: ezhi_roi_losses_integrated
+    unit_prefix: k
+    round: 3
+    method: trapezoidal
+
+template:
+  - sensor:
+      # ================================================================
+      # ◀ ANPASSUNG ERFORDERLICH: Start-Datum deiner Batterie
+      #   Ändere '2024-09-04' auf das Datum, an dem du die Batterie
+      #   in Betrieb genommen hast (Format: YYYY-MM-DD)
+      # ================================================================
+
+      # ================================================================
+      # ◀ ANPASSUNG ERFORDERLICH: Standby-Verbrauch deiner Batterie
+      #   Der EZHI verbraucht ca. 19W im Standby. Falls dein System
+      #   anders ist, suche & ersetze alle "19" (Standby) in dieser Datei.
+      #   Tipp: Messe den Standby-Verbrauch nachts bei 0W PV und
+      #   voller Batterie (kein Laden/Entladen).
+      # ================================================================
+
+      # ----------------------------------------------------------------
+      # Betriebstage seit Inbetriebnahme
+      # Verwendet input_datetime.ezhi_roi_start_datum (Fallback: 01.10.2025)
+      # ◀ ANPASSUNG: Setze dein Datum über die UI oder in der HA-Entwicklerwerkzeuge
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Betriebstage"
+        unique_id: ezhi_roi_days_running
+        unit_of_measurement: "Tage"
+        icon: mdi:calendar-clock
+        state: >
+          {% set datum = states('input_datetime.ezhi_roi_start_datum') %}
+          {% if datum not in ['unknown', 'unavailable', ''] %}
+            {% set start = strptime(datum, '%Y-%m-%d') | as_local %}
+          {% else %}
+            {% set start = strptime('2025-10-01', '%Y-%m-%d') | as_local %}
+          {% endif %}
+          {{ [((now() - start).total_seconds() / 86400) | round(0), 0] | max }}
+
+      # ----------------------------------------------------------------
+      # Batterie-Durchsatz (Gesamtentladung = nutzbare Energie)
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Durchsatz Gesamt"
+        unique_id: ezhi_roi_throughput_total
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total
+        icon: mdi:battery-sync
+        state: >
+          {{ states('sensor.ezhi_battery_total_discharge_energy') | float(0) | round(2) }}
+        attributes:
+          geladen_kwh: "{{ states('sensor.ezhi_battery_total_charge_energy') | float(0) | round(2) }}"
+          entladen_kwh: "{{ states('sensor.ezhi_battery_total_discharge_energy') | float(0) | round(2) }}"
+
+      # ----------------------------------------------------------------
+      # Realer Wirkungsgrad (DC-zu-DC)
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Wirkungsgrad DC"
+        unique_id: ezhi_roi_efficiency_dc
+        unit_of_measurement: "%"
+        icon: mdi:gauge
+        state: >
+          {% set charge = states('sensor.ezhi_battery_total_charge_energy') | float(0) %}
+          {% set discharge = states('sensor.ezhi_battery_total_discharge_energy') | float(0) %}
+          {% if charge > 0 %}
+            {{ ((discharge / charge) * 100) | round(1) }}
+          {% else %}
+            0
+          {% endif %}
+
+      # ----------------------------------------------------------------
+      # Standby-Verbrauch gesamt (kWh)
+      # ◀ ANPASSUNG: Ersetze "19" durch den Standby deines Systems
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Standby Verbrauch"
+        unique_id: ezhi_roi_standby_consumption
+        unit_of_measurement: "kWh"
+        device_class: energy
+        icon: mdi:power-sleep
+        state: >
+          {% set tage = states('sensor.ezhi_roi_betriebstage') | float(0) %}
+          {% set standby_w = 19 %}
+          {{ (tage * 24 * standby_w / 1000) | round(2) }}
+
+      # ----------------------------------------------------------------
+      # Standby-Kosten (€)
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Standby Kosten"
+        unique_id: ezhi_roi_standby_cost
+        unit_of_measurement: "€"
+        device_class: monetary
+        icon: mdi:currency-eur
+        state: >
+          {% set kwh = states('sensor.ezhi_roi_standby_verbrauch') | float(0) %}
+          {% set preis_raw = states('input_number.ezhi_roi_strompreis') | float(0) %}
+          {% set preis = (preis_raw if preis_raw > 0 else 33) / 100 %}
+          {{ (kwh * preis) | round(2) }}
+
+      # ----------------------------------------------------------------
+      # Brutto-Ersparnis: Vermiedener Netzbezug durch Entladung
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Ersparnis Brutto"
+        unique_id: ezhi_roi_savings_gross
+        unit_of_measurement: "€"
+        device_class: monetary
+        icon: mdi:cash-plus
+        state: >
+          {% set discharge = states('sensor.ezhi_battery_total_discharge_energy') | float(0) %}
+          {% set preis_raw = states('input_number.ezhi_roi_strompreis') | float(0) %}
+          {% set strompreis = (preis_raw if preis_raw > 0 else 33) / 100 %}
+          {{ (discharge * strompreis) | round(2) }}
+
+      # ----------------------------------------------------------------
+      # Entgangene Einspeisevergütung (Opportunitätskosten)
+      # Strom der in die Batterie ging, hätte eingespeist werden können
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Entgangene Einspeisung"
+        unique_id: ezhi_roi_lost_feedin
+        unit_of_measurement: "€"
+        device_class: monetary
+        icon: mdi:cash-minus
+        state: >
+          {% set charge = states('sensor.ezhi_battery_total_charge_energy') | float(0) %}
+          {% set verg_raw = states('input_number.ezhi_roi_einspeiseverguetung') | float(0) %}
+          {% set verguetung = (verg_raw if verg_raw > 0 else 8.1) / 100 %}
+          {{ (charge * verguetung) | round(2) }}
+
+      # ----------------------------------------------------------------
+      # Netto-Ersparnis (nach Abzug aller Kosten)
+      # = Vermiedener Netzbezug - Entgangene Einspeisung - Standby
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Ersparnis Netto"
+        unique_id: ezhi_roi_savings_net
+        unit_of_measurement: "€"
+        device_class: monetary
+        icon: mdi:piggy-bank
+        state: >
+          {% set brutto = states('sensor.ezhi_roi_ersparnis_brutto') | float(0) %}
+          {% set entgangen = states('sensor.ezhi_roi_entgangene_einspeisung') | float(0) %}
+          {% set standby = states('sensor.ezhi_roi_standby_kosten') | float(0) %}
+          {{ (brutto - entgangen - standby) | round(2) }}
+        attributes:
+          brutto_ersparnis: "{{ states('sensor.ezhi_roi_ersparnis_brutto') }}"
+          minus_einspeisung: "{{ states('sensor.ezhi_roi_entgangene_einspeisung') }}"
+          minus_standby: "{{ states('sensor.ezhi_roi_standby_kosten') }}"
+
+      # ----------------------------------------------------------------
+      # Amortisations-Fortschritt (%)
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Amortisation Prozent"
+        unique_id: ezhi_roi_amortization_percent
+        unit_of_measurement: "%"
+        icon: mdi:percent-circle
+        state: >
+          {% set ersparnis = states('sensor.ezhi_roi_ersparnis_netto') | float(0) %}
+          {% set kosten_raw = states('input_number.ezhi_roi_anschaffungskosten') | float(0) %}
+          {% set kosten = kosten_raw if kosten_raw > 0 else 1000 %}
+          {{ ((ersparnis / kosten) * 100) | round(1) }}
+
+      # ----------------------------------------------------------------
+      # Verbleibende Kosten bis Break-even
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Verbleibend"
+        unique_id: ezhi_roi_remaining
+        unit_of_measurement: "€"
+        device_class: monetary
+        icon: mdi:cash-clock
+        state: >
+          {% set ersparnis = states('sensor.ezhi_roi_ersparnis_netto') | float(0) %}
+          {% set kosten_raw = states('input_number.ezhi_roi_anschaffungskosten') | float(0) %}
+          {% set kosten = kosten_raw if kosten_raw > 0 else 1000 %}
+          {% set verbleibend = kosten - ersparnis %}
+          {{ [verbleibend | round(2), 0] | max }}
+
+      # ----------------------------------------------------------------
+      # Ersparnis pro Tag (Durchschnitt seit Inbetriebnahme)
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Ersparnis Pro Tag"
+        unique_id: ezhi_roi_savings_per_day
+        unit_of_measurement: "€/Tag"
+        icon: mdi:calendar-today
+        state: >
+          {% set ersparnis = states('sensor.ezhi_roi_ersparnis_netto') | float(0) %}
+          {% set tage = states('sensor.ezhi_roi_betriebstage') | float(1) %}
+          {{ (ersparnis / tage) | round(3) if tage > 0 else 0 }}
+
+      # ----------------------------------------------------------------
+      # Hochrechnung: Ersparnis pro Jahr
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Ersparnis Pro Jahr"
+        unique_id: ezhi_roi_savings_per_year
+        unit_of_measurement: "€/Jahr"
+        icon: mdi:calendar-clock
+        state: >
+          {% set pro_tag = states('sensor.ezhi_roi_ersparnis_pro_tag') | float(0) %}
+          {{ (pro_tag * 365) | round(2) }}
+
+      # ----------------------------------------------------------------
+      # Prognose: Tage bis Break-even
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Tage Bis Breakeven"
+        unique_id: ezhi_roi_days_to_breakeven
+        unit_of_measurement: "Tage"
+        icon: mdi:timer-sand
+        state: >
+          {% set verbleibend = states('sensor.ezhi_roi_verbleibend') | float(0) %}
+          {% set pro_tag = states('sensor.ezhi_roi_ersparnis_pro_tag') | float(0) %}
+          {% if pro_tag > 0 and verbleibend > 0 %}
+            {{ (verbleibend / pro_tag) | round(0) }}
+          {% elif verbleibend <= 0 %}
+            0
+          {% else %}
+            9999
+          {% endif %}
+
+      # ----------------------------------------------------------------
+      # Prognose: Break-even Datum
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Breakeven Datum"
+        unique_id: ezhi_roi_breakeven_date
+        icon: mdi:calendar-check
+        state: >
+          {% set tage = states('sensor.ezhi_roi_tage_bis_breakeven') | float(9999) %}
+          {% if tage < 9999 and tage > 0 %}
+            {{ (now() + timedelta(days=tage)).strftime('%d.%m.%Y') }}
+          {% elif tage == 0 %}
+            Erreicht!
+          {% else %}
+            Unbekannt
+          {% endif %}
+        attributes:
+          tage_verbleibend: "{{ states('sensor.ezhi_roi_tage_bis_breakeven') }}"
+          jahre_verbleibend: >
+            {% set tage = states('sensor.ezhi_roi_tage_bis_breakeven') | float(0) %}
+            {{ (tage / 365) | round(1) }}
+
+      # ----------------------------------------------------------------
+      # Amortisationszeit in Jahren
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Amortisationszeit"
+        unique_id: ezhi_roi_payback_years
+        unit_of_measurement: "Jahre"
+        icon: mdi:clock-fast
+        state: >
+          {% set kosten_raw = states('input_number.ezhi_roi_anschaffungskosten') | float(0) %}
+          {% set kosten = kosten_raw if kosten_raw > 0 else 1000 %}
+          {% set pro_jahr = states('sensor.ezhi_roi_ersparnis_pro_jahr') | float(0) %}
+          {{ (kosten / pro_jahr) | round(1) if pro_jahr > 0 else 99 }}
+
+      # ----------------------------------------------------------------
+      # Jährliche Rendite (%)
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Rendite Jaehrlich"
+        unique_id: ezhi_roi_annual_return
+        unit_of_measurement: "%"
+        icon: mdi:chart-line
+        state: >
+          {% set pro_jahr = states('sensor.ezhi_roi_ersparnis_pro_jahr') | float(0) %}
+          {% set kosten_raw = states('input_number.ezhi_roi_anschaffungskosten') | float(0) %}
+          {% set kosten = kosten_raw if kosten_raw > 0 else 1000 %}
+          {{ ((pro_jahr / kosten) * 100) | round(1) }}
+
+      # ----------------------------------------------------------------
+      # 10-Jahres-Gewinn (typische Garantiezeit)
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Gewinn 10 Jahre"
+        unique_id: ezhi_roi_profit_10_years
+        unit_of_measurement: "€"
+        device_class: monetary
+        icon: mdi:cash-multiple
+        state: >
+          {% set pro_jahr = states('sensor.ezhi_roi_ersparnis_pro_jahr') | float(0) %}
+          {% set kosten_raw = states('input_number.ezhi_roi_anschaffungskosten') | float(0) %}
+          {% set kosten = kosten_raw if kosten_raw > 0 else 1000 %}
+          {{ ((pro_jahr * 10) - kosten) | round(2) }}
+
+      # ----------------------------------------------------------------
+      # Status-Zusammenfassung (Text)
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Status"
+        unique_id: ezhi_roi_status
+        icon: mdi:battery-heart
+        state: >
+          {% set prozent = states('sensor.ezhi_roi_amortisation_prozent') | float(0) %}
+          {% if prozent >= 100 %}
+            Amortisiert ✓
+          {% elif prozent >= 75 %}
+            Fast da!
+          {% elif prozent >= 50 %}
+            Halbzeit
+          {% elif prozent >= 25 %}
+            Auf Kurs
+          {% else %}
+            Startphase
+          {% endif %}
+
+      # ================================================================
+      # WIRKUNGSGRAD-TRACKING (Live-Schätzung basierend auf Leistung)
+      # ================================================================
+      # Diese Werte basieren auf gemessenen Wirkungsgraden des EZHI.
+      # ◀ ANPASSUNG: Falls du einen anderen Wechselrichter nutzt,
+      #   passe die Werte in den if/elif-Ketten an dein System an.
+      #   Tipp: Miss den Wirkungsgrad bei verschiedenen Leistungen
+      #   und trage die Werte hier ein.
+      # ================================================================
+
+      # Aktueller Lade-Wirkungsgrad (geschätzt nach Leistung)
+      - name: "EZHI ROI Wirkungsgrad Laden Aktuell"
+        unique_id: ezhi_roi_efficiency_charge_current
+        unit_of_measurement: "%"
+        icon: mdi:battery-charging
+        state: >
+          {% set power = states('sensor.ezhi_battery_power') | float(0) %}
+          {% if power > 0 %}
+            {% if power >= 1200 %}88
+            {% elif power >= 400 %}{{ 86 + ((power - 400) / 800) * 2 }}
+            {% elif power >= 200 %}{{ 81 + ((power - 200) / 200) * 5 }}
+            {% elif power >= 100 %}{{ 70 + ((power - 100) / 100) * 11 }}
+            {% elif power >= 50 %}{{ 50 + ((power - 50) / 50) * 20 }}
+            {% else %}{{ (power / 50) * 50 }}
+            {% endif %}
+          {% else %}0{% endif %}
+
+      # Aktueller Entlade-Wirkungsgrad (geschätzt nach Leistung)
+      - name: "EZHI ROI Wirkungsgrad Entladen Aktuell"
+        unique_id: ezhi_roi_efficiency_discharge_current
+        unit_of_measurement: "%"
+        icon: mdi:battery-arrow-down
+        state: >
+          {% set power = states('sensor.ezhi_battery_power') | float(0) | abs %}
+          {% set bat_power = states('sensor.ezhi_battery_power') | float(0) %}
+          {% if bat_power < 0 %}
+            {% if power >= 1200 %}98
+            {% elif power >= 400 %}{{ 97 + ((power - 400) / 800) * 1 }}
+            {% elif power >= 200 %}{{ 94 + ((power - 200) / 200) * 3 }}
+            {% elif power >= 100 %}{{ 86 + ((power - 100) / 100) * 8 }}
+            {% elif power >= 50 %}{{ 75 + ((power - 50) / 50) * 11 }}
+            {% else %}{{ 50 + (power / 50) * 25 }}
+            {% endif %}
+          {% else %}0{% endif %}
+
+      # ================================================================
+      # VERLUST-TRACKING
+      # ================================================================
+
+      # AC-Verlustleistung beim Laden (W)
+      - name: "EZHI ROI Verlust Laden Power"
+        unique_id: ezhi_roi_loss_charge_power
+        unit_of_measurement: "W"
+        device_class: power
+        icon: mdi:lightning-bolt
+        state: >
+          {% set dc_power = states('sensor.ezhi_battery_power') | float(0) %}
+          {% if dc_power > 10 %}
+            {% set eff = states('sensor.ezhi_roi_wirkungsgrad_laden_aktuell') | float(85) / 100 %}
+            {% if eff > 0.1 %}
+              {{ ((dc_power / eff) - dc_power) | round(1) }}
+            {% else %}
+              0
+            {% endif %}
+          {% else %}
+            0
+          {% endif %}
+
+      # AC-Verlustleistung beim Entladen (W)
+      - name: "EZHI ROI Verlust Entladen Power"
+        unique_id: ezhi_roi_loss_discharge_power
+        unit_of_measurement: "W"
+        device_class: power
+        icon: mdi:lightning-bolt
+        state: >
+          {% set dc_power = states('sensor.ezhi_battery_power') | float(0) %}
+          {% if dc_power < -10 %}
+            {% set power_abs = dc_power | abs %}
+            {% set eff = states('sensor.ezhi_roi_wirkungsgrad_entladen_aktuell') | float(95) / 100 %}
+            {{ (power_abs - (power_abs * eff)) | round(1) }}
+          {% else %}
+            0
+          {% endif %}
+
+      # Gesamt-Verlustleistung (W)
+      - name: "EZHI ROI Verlust Power Gesamt"
+        unique_id: ezhi_roi_loss_power_total
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        icon: mdi:flash-alert
+        state: >
+          {% set laden = states('sensor.ezhi_roi_verlust_laden_power') | float(0) %}
+          {% set entladen = states('sensor.ezhi_roi_verlust_entladen_power') | float(0) %}
+          {{ (laden + entladen) | round(1) }}
+
+      # ----------------------------------------------------------------
+      # Geschätzte historische Verluste
+      # ◀ ANPASSUNG: Die Wirkungsgrade 0.85 (Laden) und 0.95 (Entladen)
+      #   sind EZHI-spezifisch. Passe sie an deinen Wechselrichter an.
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Verluste Geschaetzt"
+        unique_id: ezhi_roi_losses_estimated
+        unit_of_measurement: "kWh"
+        device_class: energy
+        icon: mdi:flash-off
+        state: >
+          {% set charge_dc = states('sensor.ezhi_battery_total_charge_energy') | float(0) %}
+          {% set discharge_dc = states('sensor.ezhi_battery_total_discharge_energy') | float(0) %}
+          {% set eff_charge = 0.85 %}
+          {% set eff_discharge = 0.95 %}
+          {% set charge_ac = charge_dc / eff_charge %}
+          {% set discharge_ac = discharge_dc * eff_discharge %}
+          {% set verluste = charge_ac - discharge_ac %}
+          {{ verluste | round(2) }}
+        attributes:
+          laden_ac_kwh: >
+            {% set charge_dc = states('sensor.ezhi_battery_total_charge_energy') | float(0) %}
+            {{ (charge_dc / 0.85) | round(2) }}
+          entladen_ac_kwh: >
+            {% set discharge_dc = states('sensor.ezhi_battery_total_discharge_energy') | float(0) %}
+            {{ (discharge_dc * 0.95) | round(2) }}
+          verlust_prozent: >
+            {% set charge_dc = states('sensor.ezhi_battery_total_charge_energy') | float(0) %}
+            {% set charge_ac = charge_dc / 0.85 %}
+            {% set discharge_dc = states('sensor.ezhi_battery_total_discharge_energy') | float(0) %}
+            {% set discharge_ac = discharge_dc * 0.95 %}
+            {% if charge_ac > 0 %}
+              {{ ((1 - (discharge_ac / charge_ac)) * 100) | round(1) }}
+            {% else %}
+              0
+            {% endif %}
+
+      # Verlustkosten (€) - nutzt Live-Daten wenn verfügbar
+      - name: "EZHI ROI Verlustkosten"
+        unique_id: ezhi_roi_loss_cost
+        unit_of_measurement: "€"
+        device_class: monetary
+        icon: mdi:cash-remove
+        state: >
+          {% set v_live = states('sensor.ezhi_roi_verluste_integriert') %}
+          {% if v_live not in ['unknown', 'unavailable'] %}
+            {% set verluste_kwh = v_live | float(0) %}
+          {% else %}
+            {% set verluste_kwh = states('sensor.ezhi_roi_verluste_geschaetzt') | float(0) %}
+          {% endif %}
+          {% set preis_raw = states('input_number.ezhi_roi_strompreis') | float(0) %}
+          {% set preis = (preis_raw if preis_raw > 0 else 33) / 100 %}
+          {{ (verluste_kwh * preis) | round(2) }}
+
+      # ----------------------------------------------------------------
+      # Korrigierte Netto-Ersparnis (mit Live-Verlusten)
+      # Nutzt die Riemann-Integration der leistungsabhängigen Verluste
+      # statt fester Durchschnittswerte (0.85/0.95).
+      # HINWEIS: Wird erst nach Installation genauer als die einfache
+      # Berechnung, da Verluste erst ab dem Zeitpunkt der Integration
+      # kumuliert werden. Historische Daten nutzen weiterhin Schätzwerte.
+      # ----------------------------------------------------------------
+      - name: "EZHI ROI Ersparnis Netto Korrigiert"
+        unique_id: ezhi_roi_savings_net_corrected
+        unit_of_measurement: "€"
+        device_class: monetary
+        icon: mdi:piggy-bank-outline
+        state: >
+          {% set discharge = states('sensor.ezhi_battery_total_discharge_energy') | float(0) %}
+          {% set charge = states('sensor.ezhi_battery_total_charge_energy') | float(0) %}
+          {% set preis_raw = states('input_number.ezhi_roi_strompreis') | float(0) %}
+          {% set strompreis = (preis_raw if preis_raw > 0 else 33) / 100 %}
+          {% set verg_raw = states('input_number.ezhi_roi_einspeiseverguetung') | float(0) %}
+          {% set verguetung = (verg_raw if verg_raw > 0 else 8.1) / 100 %}
+          {% set standby = states('sensor.ezhi_roi_standby_kosten') | float(0) %}
+          {# Verluste: Integriert (live) falls verfügbar, sonst Schätzung #}
+          {% set verluste_live = states('sensor.ezhi_roi_verluste_integriert') %}
+          {% if verluste_live not in ['unknown', 'unavailable'] %}
+            {% set verluste_kwh = verluste_live | float(0) %}
+          {% else %}
+            {# Fallback: Geschätzte Verluste mit Durchschnittswerten #}
+            {% set verluste_kwh = states('sensor.ezhi_roi_verluste_geschaetzt') | float(0) %}
+          {% endif %}
+          {# Brutto: Entladung × Strompreis #}
+          {% set brutto = discharge * strompreis %}
+          {# Abzüge: Entgangene Einspeisung + Standby + Verlustkosten #}
+          {% set entgangen = charge * verguetung %}
+          {% set verlustkosten = verluste_kwh * strompreis %}
+          {{ (brutto - entgangen - standby - verlustkosten) | round(2) }}
+        attributes:
+          verluste_quelle: >
+            {% set v = states('sensor.ezhi_roi_verluste_integriert') %}
+            {% if v not in ['unknown', 'unavailable'] %}
+              Live (Riemann-Integration)
+            {% else %}
+              Geschätzt (Durchschnittswerte 85%/95%)
+            {% endif %}
+          verluste_kwh: >
+            {% set v = states('sensor.ezhi_roi_verluste_integriert') %}
+            {% if v not in ['unknown', 'unavailable'] %}
+              {{ v | float(0) | round(3) }}
+            {% else %}
+              {{ states('sensor.ezhi_roi_verluste_geschaetzt') | float(0) | round(3) }}
+            {% endif %}
+          verlustkosten_euro: >
+            {% set v = states('sensor.ezhi_roi_verluste_integriert') %}
+            {% set preis_raw = states('input_number.ezhi_roi_strompreis') | float(0) %}
+            {% set preis = (preis_raw if preis_raw > 0 else 33) / 100 %}
+            {% if v not in ['unknown', 'unavailable'] %}
+              {{ (v | float(0) * preis) | round(2) }}
+            {% else %}
+              {{ (states('sensor.ezhi_roi_verluste_geschaetzt') | float(0) * preis) | round(2) }}
+            {% endif %}
+          differenz_zu_einfach: >
+            {% set einfach = states('sensor.ezhi_roi_ersparnis_netto') | float(0) %}
+            {% set korrigiert = states('sensor.ezhi_roi_ersparnis_netto_korrigiert') | float(0) %}
+            {{ (einfach - korrigiert) | round(2) }}

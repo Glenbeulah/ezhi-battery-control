@@ -1,0 +1,390 @@
+# ============================================================================
+# EZHI Batterie ROI-Analyse Dashboard
+# ============================================================================
+# 
+# INSTALLATION:
+#   Option A: Über UI (empfohlen)
+#     1. HA → Einstellungen → Dashboards → Dashboard hinzufügen (manuell)
+#     2. Dashboard öffnen → Stift-Icon → Raw-Konfigurationseditor
+#     3. Inhalt dieser Datei einfügen → Speichern
+#
+#   Option B: Als YAML-Dashboard
+#     1. In configuration.yaml:
+#        lovelace:
+#          mode: storage
+#          dashboards:
+#            lovelace-roi:
+#              mode: yaml
+#              title: ROI-Analyse
+#              icon: mdi:chart-areaspline
+#              filename: dashboards/dashboard_roi.yaml
+#     2. Datei nach /config/dashboards/dashboard_roi.yaml kopieren
+#
+# VORAUSSETZUNGEN (HACS):
+#   - Mushroom Cards: https://github.com/piitaya/lovelace-mushroom
+#   - card-mod (optional, für Styling): https://github.com/thomasloven/lovelace-card-mod
+#
+# ◀ ANPASSUNG: Falls dein Standby-Verbrauch nicht 19W ist, ändere die
+#   Zeile "primary: 19 W" weiter unten im Dashboard.
+# ============================================================================
+# ============================================================================
+# EZHI Batterie ROI-Analyse Dashboard (Public/Generic Version)
+# ============================================================================
+# Zeigt Wirtschaftlichkeit und Amortisation der Batterie
+#
+# Benötigt:
+#   - ezhi_roi_templates.yaml (Template-Sensoren)
+#   - ezhi_roi_config.yaml (Input-Numbers)
+# ============================================================================
+
+title: EZHI ROI-Analyse
+views:
+  - title: ROI-Analyse
+    path: roi
+    icon: mdi:chart-areaspline
+    cards:
+      - type: markdown
+        content: |
+          # 💰 Batterie ROI-Analyse
+          **Lohnt sich die Batterie? Wann ist sie amortisiert?**
+
+          Berechnung unter Berücksichtigung von Verlusten, Standby-Verbrauch 
+          und entgangener Einspeisevergütung.
+      - type: custom:mushroom-template-card
+        primary: '{{ states(''sensor.ezhi_roi_status'') }}'
+        secondary: >
+          {{ states('sensor.ezhi_roi_amortisation_prozent') }}% amortisiert | {{
+          states('sensor.ezhi_roi_ersparnis_netto') }}€ von {{
+          states('input_number.ezhi_roi_anschaffungskosten') | int }}€
+        icon: mdi:battery-heart-variant
+        icon_color: >
+          {% set pct = states('sensor.ezhi_roi_amortisation_prozent') | float(0)
+          %} {% if pct >= 100 %}green {% elif pct >= 75 %}light-green {% elif
+          pct >= 50 %}amber {% elif pct >= 25 %}orange {% else %}red{% endif %}
+        badge_icon: mdi:percent
+        badge_color: >
+          {% set pct = states('sensor.ezhi_roi_amortisation_prozent') | float(0)
+          %} {% if pct >= 100 %}green{% else %}blue{% endif %}
+        card_mod:
+          style: |
+            ha-card {
+              --primary-text-color: var(--primary-color);
+              font-size: 1.1em;
+            }
+        tap_action:
+          action: more-info
+          entity: sensor.ezhi_roi_ersparnis_netto
+      - type: gauge
+        entity: sensor.ezhi_roi_amortisation_prozent
+        name: Amortisation
+        min: 0
+        max: 100
+        needle: true
+        severity:
+          green: 75
+          yellow: 50
+          red: 0
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_ersparnis_netto'') }} €'
+            secondary: Netto-Ersparnis
+            icon: mdi:piggy-bank
+            icon_color: green
+            layout: vertical
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_roi_ersparnis_netto
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_verbleibend'') }} €'
+            secondary: Noch offen
+            icon: mdi:cash-clock
+            icon_color: orange
+            layout: vertical
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_breakeven_datum'') }}'
+            secondary: Break-even
+            icon: mdi:calendar-check
+            icon_color: blue
+            layout: vertical
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_roi_breakeven_datum
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_rendite_jaehrlich'') }} %'
+            secondary: Rendite/Jahr
+            icon: mdi:chart-line
+            icon_color: >
+              {% set r = states('sensor.ezhi_roi_rendite_jaehrlich') | float(0)
+              %} {% if r > 10 %}green{% elif r > 5 %}amber{% else %}red{% endif
+              %}
+            layout: vertical
+      - type: markdown
+        content: '### 🎯 Prognose'
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_amortisationszeit'') }} Jahre'
+            secondary: Amortisationszeit
+            icon: mdi:clock-fast
+            color: >
+              {% set y = states('sensor.ezhi_roi_amortisationszeit') | float(99)
+              %} {% if y <= 5 %}green{% elif y <= 10 %}amber{% else %}red{%
+              endif %}
+            vertical: true
+            features_position: bottom
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_roi_amortisationszeit
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_ersparnis_pro_jahr'') }} €'
+            secondary: Ersparnis/Jahr
+            icon: mdi:calendar-clock
+            icon_color: green
+            layout: vertical
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_roi_ersparnis_pro_jahr
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_gewinn_10_jahre'') }} €'
+            secondary: Gewinn (10 Jahre)
+            icon: mdi:cash-multiple
+            icon_color: >
+              {% set g = states('sensor.ezhi_roi_gewinn_10_jahre') | float(0) %}
+              {% if g > 0 %}green{% else %}red{% endif %}
+            layout: vertical
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_roi_gewinn_10_jahre
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_ersparnis_pro_tag'') }} €'
+            secondary: Pro Tag
+            icon: mdi:calendar-today
+            icon_color: blue
+            layout: vertical
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_roi_ersparnis_pro_tag
+      - type: markdown
+        content: '### 📊 Ersparnis-Aufschlüsselung'
+      - type: entities
+        entities:
+          - type: section
+            label: Einnahmen
+          - entity: sensor.ezhi_roi_ersparnis_brutto
+            name: Vermiedener Netzbezug
+            icon: mdi:cash-plus
+          - type: section
+            label: Abzüge
+          - entity: sensor.ezhi_roi_entgangene_einspeisung
+            name: Entgangene Einspeisevergütung
+            icon: mdi:cash-minus
+          - entity: sensor.ezhi_roi_standby_kosten
+            name: Standby-Kosten
+            icon: mdi:power-sleep
+          - type: divider
+          - entity: sensor.ezhi_roi_ersparnis_netto
+            name: '= Netto-Ersparnis'
+            icon: mdi:piggy-bank
+      - type: markdown
+        content: '### ⚡ Durchsatz & Wirkungsgrad'
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-template-card
+            primary: >-
+              {{ state_attr('sensor.ezhi_roi_durchsatz_gesamt', 'geladen_kwh')
+              }} kWh
+            secondary: Geladen (DC)
+            icon: mdi:battery-plus
+            color: green
+            vertical: true
+            features_position: bottom
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_roi_durchsatz_gesamt
+          - type: custom:mushroom-template-card
+            primary: >-
+              {{ state_attr('sensor.ezhi_roi_durchsatz_gesamt', 'entladen_kwh')
+              }} kWh
+            secondary: Entladen (DC)
+            icon: mdi:battery-minus
+            color: orange
+            vertical: true
+            features_position: bottom
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_roi_durchsatz_gesamt
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_wirkungsgrad_dc'') }} %'
+            secondary: Wirkungsgrad (DC)
+            icon: mdi:gauge
+            icon_color: >
+              {% set e = states('sensor.ezhi_roi_wirkungsgrad_dc') | float(0) %}
+              {% if e > 90 %}green{% elif e > 80 %}amber{% else %}red{% endif %}
+            layout: vertical
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_roi_wirkungsgrad_dc
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_betriebstage'') }} Tage'
+            secondary: Betriebsdauer
+            icon: mdi:calendar-clock
+            icon_color: blue
+            layout: vertical
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_roi_betriebstage
+      - type: markdown
+        content: '### 🔋 Batterie-Zähler (EZHI)'
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-template-card
+            primary: >-
+              {{ states('sensor.ezhi_battery_total_charge_energy') | float(0) |
+              round(1) }} kWh
+            secondary: Total Charge
+            icon: mdi:battery-charging
+            icon_color: green
+            layout: vertical
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_battery_total_charge_energy
+          - type: custom:mushroom-template-card
+            primary: >-
+              {{ states('sensor.ezhi_battery_total_discharge_energy') | float(0)
+              | round(1) }} kWh
+            secondary: Total Discharge
+            icon: mdi:battery-arrow-down
+            icon_color: orange
+            layout: vertical
+            tap_action:
+              action: more-info
+              entity: sensor.ezhi_battery_total_discharge_energy
+          - type: custom:mushroom-template-card
+            primary: >
+              {% set c = states('sensor.ezhi_battery_total_charge_energy') |
+              float(0) %} {% set d =
+              states('sensor.ezhi_battery_total_discharge_energy') | float(0) %}
+              {{ (c - d) | round(1) }} kWh
+            secondary: Verluste (DC)
+            icon: mdi:lightning-bolt-circle
+            icon_color: red
+            layout: vertical
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-template-card
+            primary: 19 W
+            secondary: Standby-Leistung
+            icon: mdi:power-sleep
+            icon_color: grey
+            layout: vertical
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_standby_verbrauch'') }} kWh'
+            secondary: Standby gesamt
+            icon: mdi:lightning-bolt
+            icon_color: red
+            layout: vertical
+          - type: custom:mushroom-template-card
+            primary: '{{ states(''sensor.ezhi_roi_standby_kosten'') }} €'
+            secondary: Standby-Kosten
+            icon: mdi:cash-remove
+            icon_color: red
+            layout: vertical
+      - type: conditional
+        conditions:
+          - condition: numeric_state
+            entity: sensor.ezhi_battery_power
+            above: 10
+        card:
+          type: custom:mushroom-template-card
+          primary: 'Laden: {{ states(''sensor.ezhi_roi_wirkungsgrad_laden_aktuell'') }}%'
+          secondary: bei {{ states('sensor.ezhi_battery_power') | float(0) | round(0) }}W
+          icon: mdi:battery-charging
+          icon_color: green
+      - type: conditional
+        conditions:
+          - condition: numeric_state
+            entity: sensor.ezhi_battery_power
+            below: -10
+        card:
+          type: custom:mushroom-template-card
+          primary: >-
+            Entladen: {{ states('sensor.ezhi_roi_wirkungsgrad_entladen_aktuell')
+            }}%
+          secondary: >-
+            bei {{ states('sensor.ezhi_battery_power') | float(0) | abs |
+            round(0) }}W
+          icon: mdi:battery-arrow-down
+          icon_color: orange
+      - type: markdown
+        content: |
+          ### 📈 Wirkungsgrad-Kurven (gemessen)
+
+          | Leistung | Laden | Entladen |
+          |----------|-------|----------|
+          | 1200W | 88% | 98% |
+          | 400W | 86% | 97% |
+          | 200W | 81% | 94% |
+          | 100W | 70% | 86% |
+          | 50W | 50% | 75% |
+
+          *Standby: 19W konstant*
+      - type: markdown
+        content: '### ⚙️ Konfiguration'
+      - type: entities
+        show_header_toggle: false
+        entities:
+          - entity: input_number.ezhi_roi_anschaffungskosten
+            name: Anschaffungskosten
+          - entity: input_number.ezhi_roi_strompreis
+            name: Strompreis
+          - entity: input_number.ezhi_roi_einspeiseverguetung
+            name: Einspeisevergütung
+          - entity: input_datetime.ezhi_roi_start_datum
+            name: Inbetriebnahme-Datum
+          - type: section
+            label: Festwerte
+          - type: attribute
+            entity: sensor.ezhi_roi_betriebstage
+            attribute: friendly_name
+            name: Standby-Verbrauch
+            icon: mdi:power-sleep
+            secondary_info: 19 W (hardcoded)
+      - type: markdown
+        content: >
+          ### ℹ️ Berechnungslogik
+
+
+          **Netto-Ersparnis** = Vermiedener Netzbezug - Entgangene Einspeisung -
+          Standby
+
+
+          | Komponente | Formel |
+
+          |------------|--------|
+
+          | Vermiedener Netzbezug | Entladung × Strompreis (33ct) |
+
+          | Entgangene Einspeisung | Ladung × Einspeisevergütung (8,1ct) |
+
+          | Standby-Kosten | Tage × 24h × 19W × Strompreis |
+
+
+          **Netto pro kWh** = 33ct - 8,1ct = 24,9ct (vor Verlusten)
+
+
+          Bei ~93% DC-Wirkungsgrad: **~23ct/kWh netto**
+      - type: entities
+        title: '🔧 Debug: ROI-Sensoren'
+        show_header_toggle: false
+        entities:
+          - entity: sensor.ezhi_roi_durchsatz_gesamt
+          - entity: sensor.ezhi_roi_wirkungsgrad_dc
+          - entity: sensor.ezhi_roi_betriebstage
+          - entity: sensor.ezhi_roi_ersparnis_brutto
+          - entity: sensor.ezhi_roi_entgangene_einspeisung
+          - entity: sensor.ezhi_roi_standby_kosten
+          - entity: sensor.ezhi_roi_ersparnis_netto
+          - entity: sensor.ezhi_roi_amortisation_prozent
+          - entity: sensor.ezhi_roi_tage_bis_breakeven
+          - entity: sensor.ezhi_roi_status
