@@ -380,13 +380,13 @@ Nach einem Peak wird die Reaktion gedämpft:
 
 ## 📜 Version History
 
-### v1.0.4 (2024-12-25)
+### v1.0.4 (2025-12-25)
 - FIX: Bei WR-Timeout stabilen Aufwach-Wert (-50W) statt 0W setzen
 - NEU: Totband (30W) verhindert Oszillationen bei kleinen Änderungen
 - VERBESSERT: Brutto-Überschuss-Berechnung berücksichtigt aktuelle WR-Leistung
 - Parameter: soc_schutz_puffer 40→70W, soc_schutz_rampe 70→40W
 
-### v1.0.0 (2024-12-20)
+### v1.0.0 (2025-12-20)
 - Initiale Version
 - 5W-Netzbilanz-Regelung mit Peak-Erkennung
 - SOC-Schutz mit PV-Laden
