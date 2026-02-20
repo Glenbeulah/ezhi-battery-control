@@ -10,11 +10,6 @@ Berechnet die Wirtschaftlichkeit und Amortisation deiner APsystems EZHI Batterie
 - **Wirkungsgrad-Tracking** (DC-zu-DC und leistungsabhängig)
 - **Verlust-Analyse** (AC-Verluste beim Laden/Entladen)
 
-## Screenshot
-
-![ROI Dashboard](../screenshots/roi_dashboard.png)
-*(Screenshot optional – erstelle einen von deinem Dashboard)*
-
 ---
 
 ## Voraussetzungen
