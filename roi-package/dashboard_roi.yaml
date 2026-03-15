@@ -27,15 +27,6 @@
 # ◀ ANPASSUNG: Falls dein Standby-Verbrauch nicht 19W ist, ändere die
 #   Zeile "primary: 19 W" weiter unten im Dashboard.
 # ============================================================================
-# ============================================================================
-# EZHI Batterie ROI-Analyse Dashboard (Public/Generic Version)
-# ============================================================================
-# Zeigt Wirtschaftlichkeit und Amortisation der Batterie
-#
-# Benötigt:
-#   - ezhi_roi_templates.yaml (Template-Sensoren)
-#   - ezhi_roi_config.yaml (Input-Numbers)
-# ============================================================================
 
 title: EZHI ROI-Analyse
 views:
@@ -356,6 +347,20 @@ views:
             name: Standby-Verbrauch
             icon: mdi:power-sleep
             secondary_info: 19 W (hardcoded)
+          - type: section
+            label: Snapshot-System
+          - type: attribute
+            entity: sensor.ezhi_roi_ersparnis_brutto
+            attribute: snapshot_eur
+            name: Brutto-Snapshot
+            icon: mdi:camera
+            suffix: " €"
+          - type: attribute
+            entity: sensor.ezhi_roi_ersparnis_brutto
+            attribute: snapshot_kwh
+            name: Brutto-Snapshot kWh
+            icon: mdi:camera
+            suffix: " kWh"
       - type: markdown
         content: >
           ### ℹ️ Berechnungslogik
@@ -369,17 +374,16 @@ views:
 
           |------------|--------|
 
-          | Vermiedener Netzbezug | Entladung × Strompreis (33ct) |
+          | Vermiedener Netzbezug | Entladung × Strompreis |
 
-          | Entgangene Einspeisung | Ladung × Einspeisevergütung (8,1ct) |
+          | Entgangene Einspeisung | Ladung × Einspeisevergütung |
 
           | Standby-Kosten | Tage × 24h × 19W × Strompreis |
 
 
-          **Netto pro kWh** = 33ct - 8,1ct = 24,9ct (vor Verlusten)
-
-
-          Bei ~93% DC-Wirkungsgrad: **~23ct/kWh netto**
+          **Strompreis-Snapshot:** Bei Preisänderungen werden die bisherigen
+          kWh mit dem alten Preis als Snapshot gesichert. Neue kWh werden
+          mit dem neuen Preis berechnet. So bleiben historische Erträge korrekt.
       - type: entities
         title: '🔧 Debug: ROI-Sensoren'
         show_header_toggle: false

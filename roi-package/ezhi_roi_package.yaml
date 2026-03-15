@@ -57,10 +57,59 @@ input_number:
     name: "EZHI ROI Strompreis"
     min: 0
     max: 100
-    step: 0.1
+    step: 0.01
     initial: 30             # ◀ ANPASSUNG: Dein Strompreis in ct/kWh (wird nur beim ersten Start gesetzt)
     unit_of_measurement: "ct/kWh"
     icon: mdi:flash
+    mode: box
+
+  # --------------------------------------------------------------------------
+  # Snapshot-System für Strompreisänderungen
+  # --------------------------------------------------------------------------
+  # Diese Werte werden AUTOMATISCH von der Snapshot-Automation gesetzt.
+  # Nicht manuell ändern! Initial 0 = kein Snapshot vorhanden.
+  # --------------------------------------------------------------------------
+
+  # Brutto-Ersparnis Snapshot (Entladung × Strompreis zum Zeitpunkt der Preisänderung)
+  ezhi_roi_brutto_snapshot_kwh:
+    name: "EZHI ROI Brutto Snapshot kWh"
+    min: 0
+    max: 100000
+    step: 0.01
+    initial: 0
+    unit_of_measurement: "kWh"
+    icon: mdi:camera
+    mode: box
+
+  ezhi_roi_brutto_snapshot_eur:
+    name: "EZHI ROI Brutto Snapshot EUR"
+    min: 0
+    max: 100000
+    step: 0.01
+    initial: 0
+    unit_of_measurement: "€"
+    icon: mdi:camera
+    mode: box
+
+  # Standby-Kosten Snapshot (Standby-Verbrauch × Strompreis zum Zeitpunkt der Preisänderung)
+  ezhi_roi_standby_snapshot_kwh:
+    name: "EZHI ROI Standby Snapshot kWh"
+    min: 0
+    max: 100000
+    step: 0.01
+    initial: 0
+    unit_of_measurement: "kWh"
+    icon: mdi:camera
+    mode: box
+
+  ezhi_roi_standby_snapshot_eur:
+    name: "EZHI ROI Standby Snapshot EUR"
+    min: 0
+    max: 100000
+    step: 0.01
+    initial: 0
+    unit_of_measurement: "€"
+    icon: mdi:camera
     mode: box
 
 # Inbetriebnahme-Datum der Batterie
@@ -73,8 +122,72 @@ input_datetime:
 
 
 # ============================================================================
-# TEMPLATE-SENSOREN - ROI-Berechnung
+# SNAPSHOT-AUTOMATION
 # ============================================================================
+# Wird automatisch ausgelöst wenn ezhi_roi_strompreis geändert wird.
+# Sichert Batterie-Werte als Snapshot, sodass historische Erträge
+# korrekt mit dem alten Preis erhalten bleiben.
+#
+# Formel: neuer_snap_€ = alter_snap_€ + (aktuell_kWh - alter_snap_kWh) × alter_Preis
+# ============================================================================
+
+automation:
+  - alias: "EZHI ROI Strompreis Snapshot"
+    id: ezhi_roi_strompreis_snapshot
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: input_number.ezhi_roi_strompreis
+    condition:
+      - condition: template
+        value_template: >
+          {{ trigger.from_state.state != trigger.to_state.state
+             and trigger.from_state.state not in ['unavailable', 'unknown'] }}
+    action:
+      - variables:
+          alter_preis: "{{ trigger.from_state.state | float(0) / 100 }}"
+          neuer_preis: "{{ trigger.to_state.state | float(0) / 100 }}"
+      # === Brutto Snapshot (Entladung) ===
+      - variables:
+          discharge: "{{ states('sensor.ezhi_battery_total_discharge_energy') | float(0) }}"
+          snap_kwh: "{{ states('input_number.ezhi_roi_brutto_snapshot_kwh') | float(0) }}"
+          snap_eur: "{{ states('input_number.ezhi_roi_brutto_snapshot_eur') | float(0) }}"
+          neuer_snap_eur: "{{ (snap_eur + (discharge - snap_kwh) * alter_preis) | round(2) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.ezhi_roi_brutto_snapshot_kwh
+        data:
+          value: "{{ discharge }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.ezhi_roi_brutto_snapshot_eur
+        data:
+          value: "{{ neuer_snap_eur }}"
+      # === Standby Snapshot ===
+      - variables:
+          standby: "{{ states('sensor.ezhi_roi_standby_verbrauch') | float(0) }}"
+          standby_snap_kwh: "{{ states('input_number.ezhi_roi_standby_snapshot_kwh') | float(0) }}"
+          standby_snap_eur: "{{ states('input_number.ezhi_roi_standby_snapshot_eur') | float(0) }}"
+          neuer_standby_eur: "{{ (standby_snap_eur + (standby - standby_snap_kwh) * alter_preis) | round(2) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.ezhi_roi_standby_snapshot_kwh
+        data:
+          value: "{{ standby }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.ezhi_roi_standby_snapshot_eur
+        data:
+          value: "{{ neuer_standby_eur }}"
+      # === Benachrichtigung ===
+      - service: persistent_notification.create
+        data:
+          title: "EZHI ROI Strompreis-Snapshot"
+          message: >
+            Strompreis geändert: {{ (alter_preis * 100) | round(2) }} → {{ (neuer_preis * 100) | round(2) }} ct/kWh.
+            Brutto-Snapshot: {{ neuer_snap_eur }}€ bei {{ discharge | round(1) }} kWh Entladung.
+            Standby-Snapshot: {{ neuer_standby_eur }}€ bei {{ standby | round(1) }} kWh.
+
 
 # ============================================================================
 # RIEMANN-SUMMEN-INTEGRATION für Live-Verlust-Tracking
@@ -172,7 +285,9 @@ template:
           {{ (tage * 24 * standby_w / 1000) | round(2) }}
 
       # ----------------------------------------------------------------
-      # Standby-Kosten (€)
+      # Standby-Kosten (€) — Snapshot-basiert
+      # Bei Strompreisänderung werden die bisherigen Kosten als Snapshot
+      # gesichert. Neue kWh werden mit dem neuen Preis berechnet.
       # ----------------------------------------------------------------
       - name: "EZHI ROI Standby Kosten"
         unique_id: ezhi_roi_standby_cost
@@ -180,13 +295,17 @@ template:
         device_class: monetary
         icon: mdi:currency-eur
         state: >
+          {% set snap_eur = states('input_number.ezhi_roi_standby_snapshot_eur') | float(0) %}
+          {% set snap_kwh = states('input_number.ezhi_roi_standby_snapshot_kwh') | float(0) %}
           {% set kwh = states('sensor.ezhi_roi_standby_verbrauch') | float(0) %}
           {% set preis_raw = states('input_number.ezhi_roi_strompreis') | float(0) %}
-          {% set preis = (preis_raw if preis_raw > 0 else 33) / 100 %}
-          {{ (kwh * preis) | round(2) }}
+          {% set preis = (preis_raw if preis_raw > 0 else 30) / 100 %}
+          {% set delta = [kwh - snap_kwh, 0] | max %}
+          {{ (snap_eur + delta * preis) | round(2) }}
 
       # ----------------------------------------------------------------
       # Brutto-Ersparnis: Vermiedener Netzbezug durch Entladung
+      # Snapshot-basiert: Historische kWh behalten ihren alten Preis.
       # ----------------------------------------------------------------
       - name: "EZHI ROI Ersparnis Brutto"
         unique_id: ezhi_roi_savings_gross
@@ -194,10 +313,17 @@ template:
         device_class: monetary
         icon: mdi:cash-plus
         state: >
+          {% set snap_eur = states('input_number.ezhi_roi_brutto_snapshot_eur') | float(0) %}
+          {% set snap_kwh = states('input_number.ezhi_roi_brutto_snapshot_kwh') | float(0) %}
           {% set discharge = states('sensor.ezhi_battery_total_discharge_energy') | float(0) %}
           {% set preis_raw = states('input_number.ezhi_roi_strompreis') | float(0) %}
-          {% set strompreis = (preis_raw if preis_raw > 0 else 33) / 100 %}
-          {{ (discharge * strompreis) | round(2) }}
+          {% set strompreis = (preis_raw if preis_raw > 0 else 30) / 100 %}
+          {% set delta = [discharge - snap_kwh, 0] | max %}
+          {{ (snap_eur + delta * strompreis) | round(2) }}
+        attributes:
+          snapshot_kwh: "{{ states('input_number.ezhi_roi_brutto_snapshot_kwh') }}"
+          snapshot_eur: "{{ states('input_number.ezhi_roi_brutto_snapshot_eur') }}"
+          entladung_gesamt_kwh: "{{ states('sensor.ezhi_battery_total_discharge_energy') }}"
 
       # ----------------------------------------------------------------
       # Entgangene Einspeisevergütung (Opportunitätskosten)
@@ -211,7 +337,7 @@ template:
         state: >
           {% set charge = states('sensor.ezhi_battery_total_charge_energy') | float(0) %}
           {% set verg_raw = states('input_number.ezhi_roi_einspeiseverguetung') | float(0) %}
-          {% set verguetung = (verg_raw if verg_raw > 0 else 8.1) / 100 %}
+          {% set verguetung = (verg_raw if verg_raw > 0 else 8.0) / 100 %}
           {{ (charge * verguetung) | round(2) }}
 
       # ----------------------------------------------------------------
@@ -530,7 +656,7 @@ template:
             {% set verluste_kwh = states('sensor.ezhi_roi_verluste_geschaetzt') | float(0) %}
           {% endif %}
           {% set preis_raw = states('input_number.ezhi_roi_strompreis') | float(0) %}
-          {% set preis = (preis_raw if preis_raw > 0 else 33) / 100 %}
+          {% set preis = (preis_raw if preis_raw > 0 else 30) / 100 %}
           {{ (verluste_kwh * preis) | round(2) }}
 
       # ----------------------------------------------------------------
@@ -550,9 +676,9 @@ template:
           {% set discharge = states('sensor.ezhi_battery_total_discharge_energy') | float(0) %}
           {% set charge = states('sensor.ezhi_battery_total_charge_energy') | float(0) %}
           {% set preis_raw = states('input_number.ezhi_roi_strompreis') | float(0) %}
-          {% set strompreis = (preis_raw if preis_raw > 0 else 33) / 100 %}
+          {% set strompreis = (preis_raw if preis_raw > 0 else 30) / 100 %}
           {% set verg_raw = states('input_number.ezhi_roi_einspeiseverguetung') | float(0) %}
-          {% set verguetung = (verg_raw if verg_raw > 0 else 8.1) / 100 %}
+          {% set verguetung = (verg_raw if verg_raw > 0 else 8.0) / 100 %}
           {% set standby = states('sensor.ezhi_roi_standby_kosten') | float(0) %}
           {# Verluste: Integriert (live) falls verfügbar, sonst Schätzung #}
           {% set verluste_live = states('sensor.ezhi_roi_verluste_integriert') %}
@@ -586,7 +712,7 @@ template:
           verlustkosten_euro: >
             {% set v = states('sensor.ezhi_roi_verluste_integriert') %}
             {% set preis_raw = states('input_number.ezhi_roi_strompreis') | float(0) %}
-            {% set preis = (preis_raw if preis_raw > 0 else 33) / 100 %}
+            {% set preis = (preis_raw if preis_raw > 0 else 30) / 100 %}
             {% if v not in ['unknown', 'unavailable'] %}
               {{ (v | float(0) * preis) | round(2) }}
             {% else %}

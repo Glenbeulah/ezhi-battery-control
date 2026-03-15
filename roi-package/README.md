@@ -9,6 +9,7 @@ Berechnet die Wirtschaftlichkeit und Amortisation deiner APsystems EZHI Batterie
 - **Jährliche Rendite** und 10-Jahres-Gewinn-Prognose
 - **Wirkungsgrad-Tracking** (DC-zu-DC und leistungsabhängig)
 - **Verlust-Analyse** (AC-Verluste beim Laden/Entladen)
+- **Strompreis-Snapshot** — bei Preisänderungen bleiben historische Erträge korrekt
 
 ---
 
@@ -94,6 +95,27 @@ Nach dem Neustart:
 
 ---
 
+## Strompreis-Snapshot (automatisch)
+
+Wenn sich dein Strompreis ändert, soll die bisherige Ersparnis nicht rückwirkend neu berechnet werden. Das Package enthält eine **Automation**, die bei Änderung von `input_number.ezhi_roi_strompreis` automatisch einen Snapshot erstellt:
+
+```
+Neuer Snapshot = bisheriger Snapshot + (aktuelle kWh − Snapshot kWh) × alter Preis
+```
+
+**So funktioniert es:**
+1. Du änderst den Strompreis im Dashboard (z.B. von 32,33 auf 27,76 ct/kWh)
+2. Die Automation sichert automatisch die bisherigen kWh und € als Snapshot
+3. Ab sofort werden nur neue kWh mit dem neuen Preis berechnet
+4. Du bekommst eine Benachrichtigung mit den Snapshot-Details
+
+**Beispiel:** Batterie hat 500 kWh bei 30 ct entladen (= 150€). Preis wird auf 28 ct geändert.
+→ Snapshot: 150€ bei 500 kWh. Ab jetzt: 150€ + (neue kWh − 500) × 0,28 €/kWh.
+
+> **Wichtig:** Die Snapshot-Helfer (`ezhi_roi_brutto_snapshot_*`, `ezhi_roi_standby_snapshot_*`) werden automatisch verwaltet. Nicht manuell ändern!
+
+---
+
 ## Anpassung an andere Systeme
 
 Falls du keinen EZHI nutzt, sondern ein anderes Batteriesystem, musst du die **Sensor-Namen** anpassen.
@@ -127,6 +149,14 @@ Break-even (Tage) = Verbleibend (€) / Ersparnis pro Tag (€)
 Rendite (%/Jahr)  = Ersparnis pro Jahr / Anschaffungskosten × 100
 ```
 
+### Snapshot-basierte Berechnung
+
+Bei Strompreisänderungen wird die Formel zu:
+```
+Brutto = Snapshot€ + (aktuelle_kWh − Snapshot_kWh) × neuer_Preis
+```
+Dadurch werden historische kWh korrekt mit dem damaligen Preis bewertet.
+
 ### Korrigierte Berechnung (mit Live-Verlusten)
 
 Der Sensor `EZHI ROI Ersparnis Netto Korrigiert` nutzt eine **Riemann-Summen-Integration** (`sensor.ezhi_roi_verluste_integriert`) über die leistungsabhängige Verlustleistung. Dadurch wird der Wirkungsgrad bei jeder Leistungsstufe korrekt erfasst, statt feste Durchschnittswerte zu verwenden.
@@ -153,8 +183,8 @@ Der Sensor `EZHI ROI Ersparnis Netto Korrigiert` nutzt eine **Riemann-Summen-Int
 | `sensor.ezhi_roi_durchsatz_gesamt` | Gesamte Entladeenergie |
 | `sensor.ezhi_roi_wirkungsgrad_dc` | Realer DC-zu-DC Wirkungsgrad |
 | `sensor.ezhi_roi_standby_verbrauch` | Kumulierter Standby-Verbrauch |
-| `sensor.ezhi_roi_standby_kosten` | Standby-Kosten in € |
-| `sensor.ezhi_roi_ersparnis_brutto` | Vermiedener Netzbezug in € |
+| `sensor.ezhi_roi_standby_kosten` | Standby-Kosten in € (Snapshot-basiert) |
+| `sensor.ezhi_roi_ersparnis_brutto` | Vermiedener Netzbezug in € (Snapshot-basiert) |
 | `sensor.ezhi_roi_entgangene_einspeisung` | Entgangene Einspeisevergütung in € |
 | `sensor.ezhi_roi_ersparnis_netto` | Netto-Ersparnis nach Abzügen |
 | `sensor.ezhi_roi_amortisation_prozent` | Amortisationsfortschritt in % |
